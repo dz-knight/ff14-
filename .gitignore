@@ -1,0 +1,22 @@
+# Build outputs
+bin/
+obj/
+dist/
+
+# IDE / user files
+*.user
+*.suo
+*.pdb
+*.cache
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local runtime / temp data
+WebView2Runtime/
+
+# Archives
+*.zip
+*.7z
+*.rar

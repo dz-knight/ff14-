@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FF14 物价百科</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;800&family=Noto+Serif+SC:wght@700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div class="hero__backdrop"></div>
+      <div class="hero__content">
+        <div class="hero__copy">
+          <p class="eyebrow">FFXIV Market + Wiki</p>
+          <h1>FF14 物价百科</h1>
+          <p class="hero__summary">
+            一个用 <span>HTML + JavaScript</span> 重做的本地百科前端。
+            现在只保留中国国服数据，支持物品和任务搜索，并且每个结果都能跳到独立详情页。
+          </p>
+          <div class="hero__stats" id="hero-stats">
+            <div class="stat-pill">
+              <span class="stat-pill__label">数据源</span>
+              <span class="stat-pill__value">CafeMaker / Universalis</span>
+            </div>
+            <div class="stat-pill">
+              <span class="stat-pill__label">状态</span>
+              <span class="stat-pill__value" id="boot-status">初始化中</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="search-panel">
+          <label class="search-panel__label" for="item-search">搜索物品或任务</label>
+          <div class="search-panel__bar">
+            <input id="item-search" type="search" placeholder="输入物品名，或输入任务:66358 直接打开任务" autocomplete="off">
+            <button id="search-button" type="button">搜索</button>
+          </div>
+          <div class="search-panel__tips">
+            <span>支持物品与任务搜索</span>
+            <span>只读取中国国服市场板</span>
+            <span>点击结果跳转独立详情页</span>
+          </div>
+          <div class="search-history" id="search-history"></div>
+          <div class="search-results hidden" id="search-results"></div>
+        </div>
+      </div>
+    </header>
+
+    <main class="content">
+      <section class="top-grid">
+        <article class="card item-card" id="item-overview">
+          <div class="card__header">
+            <p class="card__eyebrow">物品总览</p>
+            <h2>等待搜索</h2>
+          </div>
+          <div class="empty-state">
+            <p>输入一个物品名后，这里会显示基础信息、分类、描述和百科入口。</p>
+          </div>
+        </article>
+
+        <article class="card market-card" id="market-overview">
+          <div class="card__header">
+            <p class="card__eyebrow">市场总览</p>
+            <h2>国服价格</h2>
+          </div>
+          <div class="empty-state">
+            <p>搜索物品后自动汇总中国国服各大区、数据中心和世界服最低价。</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="card region-card">
+        <div class="card__header">
+          <div>
+            <p class="card__eyebrow">区服筛选</p>
+            <h2>国服世界服价格面板</h2>
+          </div>
+          <div class="table-actions">
+            <input id="world-filter" type="search" placeholder="筛选区服 / 数据中心 / 大区">
+          </div>
+        </div>
+        <div class="region-filters" id="region-filters"></div>
+        <div class="table-wrap">
+          <table class="price-table">
+            <thead>
+              <tr>
+                <th>大区</th>
+                <th>数据中心</th>
+                <th>世界服</th>
+                <th>当前最低价</th>
+                <th>上架数</th>
+                <th>库存量</th>
+                <th>最近上传</th>
+              </tr>
+            </thead>
+            <tbody id="price-table-body">
+              <tr>
+                <td colspan="7" class="table-empty">暂无数据</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="detail-grid">
+        <article class="card" id="obtain-panel">
+          <div class="card__header">
+            <p class="card__eyebrow">获取方式</p>
+            <h2>如何获得</h2>
+          </div>
+          <div class="empty-state">
+            <p>这里会显示采集、制作与其他来源摘要。</p>
+          </div>
+        </article>
+
+        <article class="card" id="craft-panel">
+          <div class="card__header">
+            <p class="card__eyebrow">制作配方</p>
+            <h2>如何制作</h2>
+          </div>
+          <div class="empty-state">
+            <p>这里会显示产出该物品的配方。</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="card usage-card" id="usage-panel">
+        <div class="card__header">
+          <p class="card__eyebrow">用途</p>
+          <h2>可用于哪些配方</h2>
+        </div>
+        <div class="empty-state">
+          <p>这里会列出把该物品当作材料使用的制作条目。</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="result-item-template">
+    <button type="button" class="result-item">
+      <div class="result-item__icon"></div>
+      <div class="result-item__body">
+        <strong class="result-item__name"></strong>
+        <span class="result-item__meta"></span>
+      </div>
+    </button>
+  </template>
+
+  <script src="./app.js"></script>
+</body>
+</html>
