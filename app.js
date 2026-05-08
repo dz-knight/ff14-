@@ -5,12 +5,18 @@ const DEFAULT_ITEM_NAME = "秘银矿";
 const CN_REGION_NAME = "中国";
 const SEARCH_HISTORY_KEY = "ff14_market_search_history_v1";
 const SEARCH_HISTORY_LIMIT = 12;
+const DEBUG_LOG_KEY = "ff14_market_debug_log_v1";
 const FETCH_LIMITS = {
   usageRecipes: 120,
   craftRecipes: 40,
   gatherItems: 24,
   relatedQuests: 16,
 };
+const KNOWN_ITEM_ALIASES = {};
+
+const NORMALIZED_KNOWN_ITEM_ALIASES = Object.fromEntries(
+  Object.entries(KNOWN_ITEM_ALIASES).map(([key, value]) => [normalizeSearchKey(key), value])
+);
 
 const state = {
   dataCenters: [],
@@ -21,6 +27,9 @@ const state = {
   currentWorldRows: [],
   searchToken: 0,
   searchTimer: null,
+  pendingWikiResolve: new Map(),
+  resolvedAliases: new Map(),
+  resolvedQueries: new Map(),
   caches: {
     item: new Map(),
     quest: new Map(),
@@ -249,6 +258,7 @@ function updateRoute(type, id, name, replace = false) {
 
 function setBootStatus(text) {
   dom.bootStatus.textContent = text;
+  debugLog(`[status] ${text}`);
 }
 
 function renderFatalError(error) {
@@ -293,10 +303,16 @@ function handleSearchInput(keyword) {
     return;
   }
 
+  const exactAlias = resolveKnownItemAlias(keyword);
+  if (exactAlias) {
+    renderSearchResults(searchEntitiesFromKnownAlias(keyword, exactAlias));
+    return;
+  }
+
   state.searchTimer = window.setTimeout(async () => {
     const token = ++state.searchToken;
     try {
-      const results = await searchEntities(keyword);
+      const results = await searchEntities(keyword, { allowDeepFallback: false });
       if (token !== state.searchToken) {
         return;
       }
@@ -317,6 +333,17 @@ async function performSearch(keyword, { replace = false } = {}) {
   setLoadingState(keyword);
 
   try {
+    const exactAlias = resolveKnownItemAlias(keyword);
+    if (exactAlias) {
+      const fastResults = searchEntitiesFromKnownAlias(keyword, exactAlias);
+      renderSearchResults(fastResults);
+      const preferred = fastResults[0];
+      dom.searchInput.value = preferred.name;
+      saveSearchHistory(keyword);
+      await loadItemPage(preferred.id, { replace });
+      return;
+    }
+
     const questIntent = parseQuestSearchIntent(keyword);
     if (questIntent.directQuestId) {
       await loadQuestPage(questIntent.directQuestId, { replace });
@@ -344,7 +371,7 @@ async function performSearch(keyword, { replace = false } = {}) {
       return;
     }
 
-    const results = await searchEntities(keyword);
+    const results = await searchEntities(keyword, { allowDeepFallback: true });
     renderSearchResults(results);
 
     if (!results.length) {
@@ -352,14 +379,40 @@ async function performSearch(keyword, { replace = false } = {}) {
       return;
     }
 
-    const preferred = results.find((entry) => entry.type === "item") || results[0];
-    dom.searchInput.value = preferred.name;
+    const preferred = pickPreferredSearchResult(results, keyword);
+    if (!preferred || !preferred.shouldAutoOpen) {
+      const wikiResolved = await tryResolveAmbiguousViaWiki(keyword);
+      if (wikiResolved) {
+        renderSearchResults([wikiResolved]);
+        dom.searchInput.value = wikiResolved.name;
+        saveSearchHistory(keyword);
+        if (wikiResolved.type === "wiki") {
+          renderAmbiguousSearchResult(keyword, [wikiResolved, ...results]);
+          setBootStatus(`已找到 Wiki 结果，请确认条目或直接打开国服 Wiki`);
+          return;
+        }
+        await loadItemPage(wikiResolved.id, { replace });
+        return;
+      }
+
+      dom.searchInput.value = keyword;
+      saveSearchHistory(keyword);
+      setBootStatus(`找到 ${results.length} 条相关结果，请点击列表中的准确条目`);
+      renderAmbiguousSearchResult(keyword, results);
+      return;
+    }
+
+    const selected = preferred.entry;
+    dom.searchInput.value = selected.name;
     saveSearchHistory(keyword);
 
-    if (preferred.type === "quest") {
-      await loadQuestPage(preferred.id, { replace });
+    if (selected.type === "quest") {
+      await loadQuestPage(selected.id, { replace });
     } else {
-      await loadItemPage(preferred.id, { replace });
+      if (selected.raw?.__mappingAlias) {
+        rememberResolvedAlias(keyword, selected.raw.__mappingAlias);
+      }
+      await loadItemPage(selected.id, { replace });
     }
   } catch (error) {
     console.error(error);
@@ -370,14 +423,19 @@ async function performSearch(keyword, { replace = false } = {}) {
   }
 }
 
-async function searchEntities(keyword) {
-  const cacheKey = keyword.trim().toLowerCase();
+async function searchEntities(keyword, { allowDeepFallback = true } = {}) {
+  const exactAlias = resolveKnownItemAlias(keyword);
+  if (exactAlias) {
+    return searchEntitiesFromKnownAlias(keyword, exactAlias);
+  }
+
+  const cacheKey = `${keyword.trim().toLowerCase()}::${allowDeepFallback ? "deep" : "light"}`;
   if (state.caches.search.has(cacheKey)) {
     return state.caches.search.get(cacheKey);
   }
 
   const promise = Promise.all([
-    searchItems(keyword),
+    searchItems(keyword, { allowDeepFallback }),
     searchQuests(keyword),
   ]).then(([items, quests]) => {
     const mappedItems = items.map((entry) => ({
@@ -398,27 +456,357 @@ async function searchEntities(keyword) {
       raw: entry,
     }));
 
-    return [...mappedItems, ...mappedQuests];
+    const combined = [...mappedItems, ...mappedQuests];
+    if (!combined.length) {
+      state.caches.search.delete(cacheKey);
+    }
+    return combined;
   });
 
   state.caches.search.set(cacheKey, promise);
   return promise;
 }
 
-async function searchItems(keyword) {
+function searchEntitiesFromKnownAlias(keyword, exactAlias) {
+  const items = buildResolvedAliasItems(keyword, exactAlias);
+  return items.map((entry) => ({
+    type: "item",
+    id: entry.ID,
+    name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
+    subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
+    icon: entry.Icon,
+    raw: entry,
+  }));
+}
+
+function pickPreferredSearchResult(results, keyword) {
+  if (!results.length) {
+    return null;
+  }
+
+  const normalizedKeyword = normalizeSearchKey(keyword);
+  const scored = results.map((entry, index) => ({
+    entry,
+    index,
+    score: scoreSearchResult(entry, normalizedKeyword),
+  }));
+
+  scored.sort((left, right) => {
+    if (left.score !== right.score) {
+      return right.score - left.score;
+    }
+    return left.index - right.index;
+  });
+
+  const best = scored[0];
+  if (!best) {
+    return null;
+  }
+
+  return {
+    entry: best.entry,
+    shouldAutoOpen: best.score >= 100,
+  };
+}
+
+function renderAmbiguousSearchResult(keyword, results) {
+  const topResults = results.slice(0, 8);
+  const itemsMarkup = topResults.map((entry) => {
+    const typeLabel = entry.type === "quest" ? "任务" : "物品";
+    return `
+      <div class="ingredient">
+        <span class="ingredient__name">${escapeHtml(entry.name)}</span>
+        <span class="ingredient__amount">${escapeHtml(typeLabel)}</span>
+      </div>
+    `;
+  }).join("");
+
+  const wikiButton = `
+    <div class="link-row">
+      <button type="button" class="link-button" data-wiki-search="${escapeHtml(keyword)}">在软件内打开国服 Wiki 搜索</button>
+    </div>
+  `;
+
+  const markup = `
+    <div class="notice notice--soft">
+      “${escapeHtml(keyword)}” 当前命中了相关条目，但没有足够把握自动跳转到准确物品。
+    </div>
+    <div class="subsection">
+      <h3 class="subsection__title">相关候选</h3>
+      <div class="ingredient-list">${itemsMarkup}</div>
+    </div>
+    ${wikiButton}
+  `;
+
+  dom.itemOverview.innerHTML = wrapCard("搜索结果", "需要你确认准确条目", markup);
+  dom.marketOverview.innerHTML = wrapCard("详情面板", "等待选择", `<div class="notice notice--soft">请点击上方搜索结果列表中的准确条目，或直接打开软件内 Wiki 搜索继续确认。</div>`);
+  dom.obtainPanel.innerHTML = wrapCard("获取方式", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示获取方式。</div>`);
+  dom.craftPanel.innerHTML = wrapCard("制作配方", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示制作配方。</div>`);
+  dom.usagePanel.innerHTML = wrapCard("用途", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示用途。</div>`);
+  dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">请先从候选列表中选择准确物品</td></tr>`;
+}
+
+async function tryResolveAmbiguousViaWiki(keyword) {
+  const wikiResolved = await resolveItemViaWikiFallback(keyword);
+  if (!wikiResolved?.itemId) {
+    return null;
+  }
+
+  const entry = buildResolvedAliasItems(keyword, {
+    itemId: wikiResolved.itemId,
+    name: wikiResolved.title || keyword,
+    englishName: wikiResolved.englishName || wikiResolved.title || keyword,
+    icon: "",
+    fast: true,
+    description: "该结果通过国服 Wiki 二次兜底解析得到。",
+  })[0];
+
+  return {
+    type: "item",
+    id: entry.ID,
+    name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
+    subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
+    icon: entry.Icon,
+    raw: entry,
+  };
+}
+
+function renderAmbiguousSearchResult(keyword, results) {
+  const topResults = results.slice(0, 8);
+  const itemsMarkup = topResults.map((entry) => {
+    const typeLabel = entry.type === "quest" ? "任务" : "物品";
+    const route = renderRouteLink(entry.id, entry.name, entry.type === "quest" ? "quest" : "item");
+    return `
+      <div class="ingredient">
+        <span class="ingredient__name">${route || escapeHtml(entry.name)}</span>
+        <span class="ingredient__amount">${escapeHtml(typeLabel)}</span>
+      </div>
+    `;
+  }).join("");
+
+  const wikiButton = `
+    <div class="link-row">
+      <button type="button" class="link-button" data-wiki-search="${escapeHtml(keyword)}">在软件内打开国服 Wiki 搜索</button>
+    </div>
+  `;
+
+  const markup = `
+    <div class="notice notice--soft">
+      “${escapeHtml(keyword)}” 当前命中了相关条目，但没有足够把握自动跳转到准确物品。
+    </div>
+    <div class="subsection">
+      <h3 class="subsection__title">相关候选</h3>
+      <div class="ingredient-list">${itemsMarkup}</div>
+    </div>
+    ${wikiButton}
+  `;
+
+  dom.itemOverview.innerHTML = wrapCard("搜索结果", "需要你确认准确条目", markup);
+  dom.marketOverview.innerHTML = wrapCard("详情面板", "等待选择", `<div class="notice notice--soft">请点击上方候选条目，或直接打开软件内国服 Wiki 搜索继续确认。</div>`);
+  dom.obtainPanel.innerHTML = wrapCard("获取方式", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示获取方式。</div>`);
+  dom.craftPanel.innerHTML = wrapCard("制作配方", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示制作配方。</div>`);
+  dom.usagePanel.innerHTML = wrapCard("用途", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示用途。</div>`);
+  dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">请先从候选列表中选择准确物品</td></tr>`;
+}
+
+async function tryResolveAmbiguousViaWiki(keyword) {
+  const wikiResolved = await resolveItemViaWikiFallback(keyword);
+  if (!wikiResolved) {
+    return null;
+  }
+
+  if (wikiResolved.itemId) {
+    const entry = buildResolvedAliasItems(keyword, {
+      itemId: wikiResolved.itemId,
+      name: wikiResolved.title || keyword,
+      englishName: wikiResolved.englishName || wikiResolved.title || keyword,
+      icon: "",
+      fast: true,
+      description: "该结果通过国服 Wiki 二次兜底解析得到。",
+    })[0];
+
+    return {
+      type: "item",
+      id: entry.ID,
+      name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
+      subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
+      icon: entry.Icon,
+      raw: entry,
+    };
+  }
+
+  if (wikiResolved.title || wikiResolved.url) {
+    return {
+      type: "wiki",
+      id: 0,
+      name: wikiResolved.title || keyword,
+      subtitle: "国服 Wiki 命中结果，当前无法直接映射为可定价物品，可先打开 Wiki 继续确认",
+      icon: "",
+      raw: {
+        wikiUrl: wikiResolved.url || buildWikiSearchUrl(keyword),
+      },
+    };
+  }
+
+  return null;
+}
+
+function renderSearchResults(results) {
+  if (!results.length) {
+    dom.searchResults.classList.add("hidden");
+    dom.searchResults.innerHTML = "";
+    return;
+  }
+
+  dom.searchResults.innerHTML = "";
+  const fragment = document.createDocumentFragment();
+
+  for (const entry of results) {
+    const node = dom.resultTemplate.content.firstElementChild.cloneNode(true);
+    const icon = node.querySelector(".result-item__icon");
+    const name = node.querySelector(".result-item__name");
+    const meta = node.querySelector(".result-item__meta");
+    const typeLabel = entry.type === "quest" ? "任务" : entry.type === "wiki" ? "Wiki" : "物品";
+
+    icon.style.backgroundImage = `url(${toIconUrl(entry.icon)})`;
+    name.textContent = entry.name;
+    meta.textContent = `${typeLabel} · ${entry.subtitle}`;
+
+    node.addEventListener("click", async () => {
+      dom.searchResults.classList.add("hidden");
+      dom.searchInput.value = entry.name;
+      if (entry.type === "quest") {
+        await loadQuestPage(entry.id);
+      } else if (entry.type === "wiki") {
+        openWikiSearch(entry.raw?.wikiUrl || entry.name);
+      } else {
+        await loadItemPage(entry.id);
+      }
+    });
+
+    fragment.appendChild(node);
+  }
+
+  dom.searchResults.appendChild(fragment);
+  dom.searchResults.classList.remove("hidden");
+}
+
+function scoreSearchResult(entry, normalizedKeyword) {
+  const names = [
+    entry.name,
+    entry.raw?.Name,
+    entry.raw?.Name_en,
+    entry.raw?.Name_ja,
+  ]
+    .filter(Boolean)
+    .map(normalizeSearchKey);
+
+  let best = 0;
+  for (const name of names) {
+    if (!name) continue;
+    if (name === normalizedKeyword) {
+      best = Math.max(best, 120);
+      continue;
+    }
+    if (name.startsWith(normalizedKeyword)) {
+      best = Math.max(best, 80);
+      continue;
+    }
+    if (name.includes(normalizedKeyword)) {
+      best = Math.max(best, 50);
+    }
+  }
+
+  if (entry.type === "item") {
+    best += 5;
+  }
+
+  return best;
+}
+
+async function searchItems(keyword, { allowDeepFallback = true } = {}) {
+  const exactAlias = resolveKnownItemAlias(keyword);
+  if (exactAlias) {
+    debugLog(`[searchItems:known-alias] keyword=${keyword} itemId=${exactAlias.itemId} english=${exactAlias.englishName}`);
+    return buildResolvedAliasItems(keyword, exactAlias);
+  }
+
+  debugLog(`[searchItems:start] keyword=${keyword}`);
   const encoded = encodeURIComponent(keyword);
   const columns = encodeURIComponent("ID,Name,Name_en,Name_ja,Icon,LevelItem,ItemUICategory.Name");
   const primaryUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=chs&limit=50&columns=${columns}`;
   const primary = await fetchJson(primaryUrl);
   const results = primary.Results || [];
+  debugLog(`[searchItems:primary] keyword=${keyword} count=${results.length}`);
 
-  if (results.length > 0 || !/^[\x00-\x7F]+$/.test(keyword)) {
+  if (results.length > 0) {
     return results;
   }
 
   const fallbackUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=en&limit=50&columns=${columns}`;
   const fallback = await fetchJson(fallbackUrl);
-  return fallback.Results || [];
+  const fallbackResults = fallback.Results || [];
+  debugLog(`[searchItems:fallback-en] keyword=${keyword} count=${fallbackResults.length}`);
+  if (fallbackResults.length > 0) {
+    return fallbackResults;
+  }
+
+  if (!allowDeepFallback) {
+    debugLog(`[searchItems:skip-deep-fallback] keyword=${keyword}`);
+    return [];
+  }
+
+  const wikiResolved = await resolveItemViaWikiFallback(keyword);
+  debugLog(`[searchItems:wiki-fallback-result] keyword=${keyword} success=${!!wikiResolved} itemId=${wikiResolved?.itemId ?? ""} english=${wikiResolved?.englishName ?? ""}`);
+  if (wikiResolved?.itemId) {
+    return buildResolvedAliasItems(keyword, {
+      itemId: wikiResolved.itemId,
+      englishName: wikiResolved.englishName || wikiResolved.title || keyword,
+      description: "该物品通过国服 Wiki -> Universalis 英文站兜底解析得到，当前价格可用，但百科详情可能不完整。",
+    });
+  }
+
+  return [];
+}
+
+function normalizeSearchKey(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\s+/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function buildResolvedAliasItems(keyword, resolved) {
+  const normalizedKeyword = normalizeSearchKey(keyword);
+  state.resolvedQueries.set(normalizedKeyword, {
+    itemId: resolved.itemId,
+    name: resolved.name || keyword,
+    englishName: resolved.englishName || keyword,
+    icon: resolved.icon || "",
+    fast: true,
+    description: resolved.description || "",
+  });
+  state.resolvedAliases.set(resolved.itemId, {
+    preferredName: resolved.name || keyword,
+    preferredEnglishName: resolved.englishName || keyword,
+    preferredDescription: resolved.description || "该物品通过中文别名映射或 Wiki/英文站兜底解析得到，当前价格可用，但百科详情可能不完整。",
+    icon: resolved.icon || "",
+    fast: !!resolved.fast,
+  });
+  state.caches.item.delete(resolved.itemId);
+
+  return [
+    {
+      ID: resolved.itemId,
+      Name: resolved.name || keyword,
+      Name_en: resolved.englishName || keyword,
+      Name_ja: "",
+      Icon: resolved.icon || "",
+      LevelItem: 0,
+      ItemUICategory: { Name: "别名/Wiki -> Universalis 英文站兜底解析" },
+    }
+  ];
 }
 
 async function searchQuests(keyword) {
@@ -428,7 +816,7 @@ async function searchQuests(keyword) {
   const primary = await fetchJson(primaryUrl);
   const results = primary.Results || [];
 
-  if (results.length > 0 || !/^[\x00-\x7F]+$/.test(keyword)) {
+  if (results.length > 0) {
     return results;
   }
 
@@ -472,6 +860,98 @@ function renderSearchResults(results) {
 
   dom.searchResults.appendChild(fragment);
   dom.searchResults.classList.remove("hidden");
+}
+
+function resolveItemViaWikiFallback(keyword) {
+  const query = String(keyword || "").trim();
+  if (!query) {
+    return Promise.resolve(null);
+  }
+
+  debugLog(`[wikiFallback:http-begin] keyword=${keyword}`);
+  return fetch(`/__resolve_item`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({ Query: query }),
+    })
+    .then(async (response) => {
+      debugLog(`[wikiFallback:http-status] keyword=${keyword} status=${response.status}`);
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        debugLog(`[wikiFallback:http-nonok-body] keyword=${keyword} body=${text}`);
+        return null;
+      }
+      const data = await response.json();
+      debugLog(`[wikiFallback:http-result] keyword=${keyword} success=${!!data?.success} itemId=${data?.itemId ?? ""} english=${data?.englishName ?? ""}`);
+      return data && data.success ? data : null;
+    })
+    .catch((error) => {
+      debugLog(`[wikiFallback:http-error] keyword=${keyword} error=${error?.message || error}`);
+      return null;
+    });
+}
+
+function resolveItemViaWikiFallback(keyword) {
+  const query = String(keyword || "").trim();
+  if (!query) {
+    return Promise.resolve(null);
+  }
+
+  debugLog(`[wikiFallback:http-begin] keyword=${keyword}`);
+  return fetch(`/__resolve_item`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({ Query: query }),
+    })
+    .then(async (response) => {
+      debugLog(`[wikiFallback:http-status] keyword=${keyword} status=${response.status}`);
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        debugLog(`[wikiFallback:http-nonok-body] keyword=${keyword} body=${text}`);
+        return null;
+      }
+
+      const data = await response.json();
+      debugLog(`[wikiFallback:http-result] keyword=${keyword} success=${!!data?.success} itemId=${data?.itemId ?? ""} english=${data?.englishName ?? ""}`);
+      return (data && (data.success || data.itemId || data.title || data.url || data.englishName)) ? data : null;
+    })
+    .catch((error) => {
+      debugLog(`[wikiFallback:http-error] keyword=${keyword} error=${error?.message || error}`);
+      return null;
+    });
+}
+
+function debugLog(message) {
+  try {
+    const current = loadDebugLog();
+    current.push(`[${new Date().toLocaleString("zh-CN", { hour12: false })}] ${message}`);
+    const next = current.slice(-200);
+    localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(next));
+    fetch("/__debug_log", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({ Message: message }),
+    }).catch(() => {});
+  } catch {
+    // ignore debug log failures
+  }
+}
+
+function loadDebugLog() {
+  try {
+    const raw = localStorage.getItem(DEBUG_LOG_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 function renderSearchHistory() {
@@ -548,7 +1028,10 @@ function setLoadingState(keyword) {
 }
 
 function renderNoSearchResult(keyword) {
-  const markup = `<div class="notice notice--warn">没有找到“${escapeHtml(keyword)}”。可以尝试中文全称、英文名、日文名；任务目前建议用“任务:66358”这种格式直接打开。</div>`;
+  const hostHint = window.chrome?.webview?.postMessage
+    ? "已启用桌面桥接，可继续走 Wiki 兜底。"
+    : "当前未检测到桌面桥接，Wiki 兜底不会生效。";
+  const markup = `<div class="notice notice--warn">没有找到“${escapeHtml(keyword)}”。可以尝试中文全称、英文名、日文名；任务目前建议用“任务:66358”这种格式直接打开。<br>${escapeHtml(hostHint)}</div>`;
   dom.itemOverview.innerHTML = wrapCard("搜索结果", "未找到内容", markup);
   dom.marketOverview.innerHTML = wrapCard("详情面板", "暂无数据", markup);
   dom.obtainPanel.innerHTML = wrapCard("获取方式", "暂无数据", markup);
@@ -582,7 +1065,11 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   const item = await getItem(itemId);
   updateRoute("item", item.ID, item.Name, replace);
   state.currentEntity = { type: "item", data: item };
-  dom.searchInput.value = item.Name || item.Name_en || "";
+  state.currentWorldRows = [];
+  dom.searchInput.value = getPreferredItemName(item);
+  renderItemOverview(item);
+  renderMarketOverview(item, []);
+  renderPriceTable();
 
   const links = item.GameContentLinks || {};
   const craftRecipeIds = uniqueNumbers(flattenLinkValues(links.Recipe?.ItemResult));
@@ -592,13 +1079,17 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   const limitedUsageRecipeIds = usageRecipeIds.slice(0, FETCH_LIMITS.usageRecipes);
   const craftIds = craftRecipeIds.slice(0, FETCH_LIMITS.craftRecipes);
   const gatherIds = gatheringItemIds.slice(0, FETCH_LIMITS.gatherItems);
+  const aliasMeta = state.resolvedAliases.get(itemId) || null;
+  const shouldSkipRelatedQuestSearch = !!aliasMeta?.fast || !Object.keys(links || {}).length;
 
   const [marketRows, craftRecipes, usageRecipes, gatherData, relatedQuests] = await Promise.all([
     getMarketRows(itemId),
     Promise.all(craftIds.map((id) => getRecipe(id))),
     Promise.all(limitedUsageRecipeIds.map((id) => getRecipe(id))),
     Promise.all(gatherIds.map((id) => getGatheringEntry(id))),
-    searchQuests(item.Name || item.Name_en || "").catch(() => []),
+    shouldSkipRelatedQuestSearch
+      ? Promise.resolve([])
+      : searchQuests(item.Name || item.Name_en || "").catch(() => []),
   ]);
 
   const directCraftRecipes = craftRecipes
@@ -609,7 +1100,6 @@ async function loadItemPage(itemId, { replace = false } = {}) {
     .filter((recipe) => Number(recipe.ItemResultTargetID) !== item.ID);
 
   state.currentWorldRows = marketRows;
-  renderItemOverview(item);
   renderMarketOverview(item, marketRows);
   renderPriceTable();
   renderObtainPanel(
@@ -623,7 +1113,7 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   );
   renderCraftPanel(directCraftRecipes, craftRecipeIds.length, indirectCraftRecipes);
   renderUsagePanel(usageRecipes.filter(Boolean), usageRecipeIds.length, item.ID);
-  setBootStatus(`已载入：${item.Name || item.Name_en || `#${item.ID}`}`);
+  setBootStatus(`已载入：${getPreferredItemName(item) || `#${item.ID}`}`);
 }
 
 async function loadQuestPage(questId, { replace = false } = {}) {
@@ -643,27 +1133,144 @@ async function loadQuestPage(questId, { replace = false } = {}) {
 
 async function getItem(itemId) {
   if (!state.caches.item.has(itemId)) {
-    const columns = encodeURIComponent([
-      "ID",
-      "Name",
-      "Name_en",
-      "Name_ja",
-      "Description",
-      "Icon",
-      "ItemUICategory.Name",
-      "LevelItem",
-      "PriceLow",
-      "PriceMid",
-      "CanBeHq",
-      "IsUntradable",
-      "GamePatch.Name",
-      "Patch",
-      "GameContentLinks",
-    ].join(","));
-    const url = `${ENCYCLOPEDIA_API}/item/${itemId}?language=chs&columns=${columns}`;
-    state.caches.item.set(itemId, fetchJson(url));
+    state.caches.item.set(itemId, fetchItemWithFallback(itemId));
   }
   return state.caches.item.get(itemId);
+}
+
+async function fetchItemWithFallback(itemId) {
+  const aliasMeta = state.resolvedAliases.get(itemId) || null;
+  const columns = encodeURIComponent([
+    "ID",
+    "Name",
+    "Name_en",
+    "Name_ja",
+    "Description",
+    "Icon",
+    "ItemUICategory.Name",
+    "LevelItem",
+    "PriceLow",
+    "PriceMid",
+    "CanBeHq",
+    "IsUntradable",
+    "GamePatch.Name",
+    "Patch",
+    "GameContentLinks",
+  ].join(","));
+  const url = `${ENCYCLOPEDIA_API}/item/${itemId}?language=chs&columns=${columns}`;
+  if (aliasMeta?.fast) {
+    const [primary, xivapi] = await Promise.all([
+      fetchJson(url).catch(() => null),
+      fetchXivApiItem(itemId).catch(() => null),
+    ]);
+    return applyAliasMetaToItem(mergeItemPayload(primary, xivapi, itemId), aliasMeta, itemId);
+  }
+
+  const primary = await fetchJson(url).catch(() => null);
+  if (!needsXivApiSupplement(primary, aliasMeta)) {
+    return applyAliasMetaToItem(primary, aliasMeta, itemId);
+  }
+
+  const xivapi = await fetchXivApiItem(itemId).catch(() => null);
+  return applyAliasMetaToItem(mergeItemPayload(primary, xivapi, itemId), aliasMeta, itemId);
+}
+
+function needsXivApiSupplement(item, aliasMeta) {
+  if (!item) {
+    return true;
+  }
+  if (!item.Name && !item.Name_en && aliasMeta) {
+    return true;
+  }
+  if (!item.Icon) {
+    return true;
+  }
+  return false;
+}
+
+async function fetchXivApiItem(itemId) {
+  const url = `https://v2.xivapi.com/api/sheet/Item/${itemId}?fields=Name,Description,Icon,ItemUICategory.Name,LevelItem,CanBeHq,IsUntradable,Patch`;
+  const payload = await fetchJson(url);
+  const fields = payload?.fields || {};
+  return {
+    ID: itemId,
+    Name: fields.Name || "",
+    Name_en: fields.Name || "",
+    Name_ja: "",
+    Description: fields.Description || "",
+    Icon: xivApiIconPathToUrl(fields.Icon?.path),
+    ItemUICategory: {
+      Name: fields.ItemUICategory?.fields?.Name || "未分类",
+    },
+    LevelItem: fields.LevelItem?.row_id || fields.LevelItem || 0,
+    PriceLow: 0,
+    PriceMid: 0,
+    CanBeHq: !!fields.CanBeHq,
+    IsUntradable: !!fields.IsUntradable,
+    GamePatch: {
+      Name: fields.Patch ? `Patch ${fields.Patch}` : "未知版本",
+    },
+    Patch: fields.Patch || 0,
+    GameContentLinks: {},
+  };
+}
+
+function mergeItemPayload(primary, fallback, itemId) {
+  const source = primary || {};
+  const backup = fallback || {};
+  return {
+    ID: source.ID || backup.ID || itemId,
+    Name: source.Name || backup.Name || "",
+    Name_en: source.Name_en || backup.Name_en || backup.Name || "",
+    Name_ja: source.Name_ja || backup.Name_ja || "",
+    Description: source.Description || backup.Description || "",
+    Icon: source.Icon || backup.Icon || "",
+    ItemUICategory: source.ItemUICategory?.Name
+      ? source.ItemUICategory
+      : (backup.ItemUICategory || { Name: "未分类" }),
+    LevelItem: source.LevelItem || backup.LevelItem || 0,
+    PriceLow: source.PriceLow || backup.PriceLow || 0,
+    PriceMid: source.PriceMid || backup.PriceMid || 0,
+    CanBeHq: source.CanBeHq ?? backup.CanBeHq ?? false,
+    IsUntradable: source.IsUntradable ?? backup.IsUntradable ?? false,
+    GamePatch: source.GamePatch?.Name ? source.GamePatch : (backup.GamePatch || { Name: "未知版本" }),
+    Patch: source.Patch || backup.Patch || 0,
+    GameContentLinks: source.GameContentLinks || backup.GameContentLinks || {},
+  };
+}
+
+function applyAliasMetaToItem(item, aliasMeta, itemId) {
+  const base = item || {
+    ID: itemId,
+    Name: "",
+    Name_en: "",
+    Name_ja: "",
+    Description: "",
+    Icon: "",
+    ItemUICategory: { Name: "别名/Wiki/Universalis 兜底解析" },
+    LevelItem: 0,
+    PriceLow: 0,
+    PriceMid: 0,
+    CanBeHq: false,
+    IsUntradable: false,
+    GamePatch: { Name: "未知版本" },
+    Patch: 0,
+    GameContentLinks: {},
+  };
+  if (!aliasMeta) {
+    return base;
+  }
+
+  return {
+    ...base,
+    Name: aliasMeta.preferredName || base.Name || base.Name_en || `物品 #${itemId}`,
+    Name_en: base.Name_en || aliasMeta.preferredEnglishName || base.Name || "",
+    Description: aliasMeta.preferredDescription || base.Description || "",
+    Icon: base.Icon || aliasMeta.icon || "",
+    ItemUICategory: base.ItemUICategory?.Name
+      ? base.ItemUICategory
+      : { Name: "别名/Wiki/Universalis 兜底解析" },
+  };
 }
 
 async function getQuest(questId) {
@@ -819,7 +1426,7 @@ function buildEmptyWorldRow(dataCenter, worldId) {
 }
 
 function renderItemOverview(item) {
-  const itemName = item.Name || item.Name_en || `#${item.ID}`;
+  const itemName = getPreferredItemName(item) || `#${item.ID}`;
   const patch = item.GamePatch?.Name || (item.Patch ? `Patch ${item.Patch}` : "未知版本");
   const tags = [
     item.ItemUICategory?.Name ? `<span class="tag">${escapeHtml(item.ItemUICategory.Name)}</span>` : "",
@@ -842,9 +1449,9 @@ function renderItemOverview(item) {
         <div class="tag-row">${tags}</div>
         <p class="overview__description">${escapeHtml(item.Description || "暂无物品描述。")}</p>
         <div class="link-row">
-          <a class="link-button" href="?type=item&id=${encodeURIComponent(item.ID)}&name=${encodeURIComponent(item.Name || item.Name_en || "")}">当前物品详情</a>
+          <a class="link-button" href="?type=item&id=${encodeURIComponent(item.ID)}&name=${encodeURIComponent(itemName)}">当前物品详情</a>
           ${renderExternalButton(`https://universalis.app/market/${item.ID}`, "打开市场板")}
-          ${renderExternalButton(buildWikiSearchUrl(item.Name || item.Name_en), "国服 Wiki 搜索")}
+          ${renderExternalButton(buildWikiSearchUrl(itemName), "国服 Wiki 搜索")}
         </div>
       </div>
     </div>
@@ -936,7 +1543,7 @@ function renderMarketOverview(item, worldRows) {
     </div>
   `;
 
-  dom.marketOverview.innerHTML = wrapCard("市场总览", `${item.Name || item.Name_en} 全区服价格`, markup);
+  dom.marketOverview.innerHTML = wrapCard("市场总览", `${getPreferredItemName(item) || item.Name_en} 全区服价格`, markup);
 }
 
 function renderQuestPanels(quest, questChain) {
@@ -1627,6 +2234,14 @@ function toIconUrl(iconPath) {
   return `https://cafemaker.wakingsands.com${iconPath}`;
 }
 
+function xivApiIconPathToUrl(path) {
+  if (!path) {
+    return "";
+  }
+  const normalized = String(path).replace(/^ui\/icon\//, "").replace(/\.tex$/i, ".png");
+  return `https://xivapi.com/i/${normalized}`;
+}
+
 function formatPrice(value) {
   return value == null ? "暂无" : `${Number(value).toLocaleString("zh-CN")} Gil`;
 }
@@ -1665,16 +2280,390 @@ function jsonString(value) {
   return JSON.stringify(String(value ?? ""));
 }
 
+function getPreferredItemName(item) {
+  const aliasMeta = item?.ID ? state.resolvedAliases.get(Number(item.ID)) : null;
+  return aliasMeta?.preferredName || item?.Name || item?.Name_en || "";
+}
+
 function openWikiSearch(query) {
   const text = String(query || "").trim();
   if (!text) {
     return;
   }
 
-  if (window.chrome?.webview?.postMessage) {
-    window.chrome.webview.postMessage(`wiki-search:${text}`);
+  const target = /^https?:\/\//i.test(text) ? text : buildWikiSearchUrl(text);
+  window.open(target, "_blank", "noopener,noreferrer");
+}
+
+const ITEM_MAPPING_URL = "./data/item_mapping.min.json";
+
+async function loadItemMapping() {
+  try {
+    const payload = await fetchJson(ITEM_MAPPING_URL);
+    const entries = Array.isArray(payload?.entries) ? payload.entries : (Array.isArray(payload?.Entries) ? payload.Entries : []);
+    state.itemMappingEntries = entries.map(normalizeMappingEntry).filter(Boolean);
+    state.itemMappingExact = new Map();
+
+    for (const entry of state.itemMappingEntries) {
+      const { itemId, zhName, enName, zhDescription, iconPath } = entry;
+      const alias = {
+        itemId: Number(itemId),
+        name: String(zhName || ""),
+        englishName: String(enName || ""),
+        icon: iconPath ? `https://xivapi.com/i/${iconPath}` : "",
+        fast: true,
+        description: String(zhDescription || "该结果通过本地客户端双语映射表解析得到。"),
+      };
+
+      for (const key of [alias.name, alias.englishName]) {
+        const normalized = normalizeSearchKey(key);
+        if (!normalized) continue;
+        if (!state.itemMappingExact.has(normalized)) {
+          state.itemMappingExact.set(normalized, []);
+        }
+        state.itemMappingExact.get(normalized).push(alias);
+      }
+    }
+
+    debugLog(`[mapping] loaded entries=${state.itemMappingEntries.length}`);
+  } catch (error) {
+    state.itemMappingEntries = [];
+    state.itemMappingExact = new Map();
+    debugLog(`[mapping] load-failed error=${error?.message || error}`);
+  }
+}
+
+function normalizeMappingEntry(entry) {
+  if (Array.isArray(entry)) {
+    const [itemId, zhName, enName, iconPath] = entry;
+    return {
+      itemId: Number(itemId),
+      zhName: String(zhName || ""),
+      enName: String(enName || ""),
+      iconPath: String(iconPath || ""),
+    };
+  }
+
+  if (entry && typeof entry === "object") {
+    return {
+      itemId: Number(entry.ItemId ?? entry.itemId ?? 0),
+      zhName: String(entry.ZhName ?? entry.zhName ?? ""),
+      enName: String(entry.EnName ?? entry.enName ?? ""),
+      zhDescription: String(entry.ZhDescription ?? entry.zhDescription ?? ""),
+      iconPath: String(entry.IconPath ?? entry.iconPath ?? ""),
+    };
+  }
+
+  return null;
+}
+
+async function bootstrap() {
+  renderRegionFilters(["全部"]);
+  bindEvents();
+  renderSearchHistory();
+
+  try {
+    setBootStatus("正在载入双语映射与区服数据");
+    await loadItemMapping();
+    await loadMarketMetadata();
+    renderRegionFilters(["全部", ...new Set(state.dataCenters.map((entry) => entry.region))]);
+    const cnWorldCount = state.dataCenters.reduce((sum, entry) => sum + entry.worlds.length, 0);
+    setBootStatus(`已载入国服 ${cnWorldCount} 个世界服，双语映射 ${state.itemMappingEntries?.length || 0} 条`);
+    await loadFromUrl({ replace: true });
+  } catch (error) {
+    console.error(error);
+    setBootStatus("初始化失败");
+    renderFatalError(error);
+  }
+}
+
+function resolveKnownItemAlias(keyword) {
+  const text = normalizeSearchKey(keyword);
+  const matches = state.itemMappingExact?.get(text) || state.resolvedQueries.get(text) || NORMALIZED_KNOWN_ITEM_ALIASES[text] || null;
+  if (Array.isArray(matches)) {
+    return matches.length === 1 ? matches[0] : null;
+  }
+  return matches;
+}
+
+function rememberResolvedAlias(keyword, resolved) {
+  if (!resolved?.itemId) {
     return;
   }
 
-  window.open(buildWikiSearchUrl(text), "_blank", "noopener,noreferrer");
+  const normalizedKeyword = normalizeSearchKey(keyword);
+  const alias = {
+    itemId: Number(resolved.itemId),
+    name: String(resolved.name || keyword || ""),
+    englishName: String(resolved.englishName || ""),
+    icon: String(resolved.icon || ""),
+    fast: true,
+    description: String(resolved.description || ""),
+  };
+
+  if (normalizedKeyword) {
+    state.resolvedQueries.set(normalizedKeyword, alias);
+  }
+
+  state.resolvedAliases.set(alias.itemId, {
+    preferredName: alias.name,
+    preferredEnglishName: alias.englishName,
+    preferredDescription: alias.description,
+    icon: alias.icon,
+    fast: true,
+  });
+}
+
+function searchItemsFromMapping(keyword) {
+  const normalized = normalizeSearchKey(keyword);
+  if (!normalized || !Array.isArray(state.itemMappingEntries) || !state.itemMappingEntries.length) {
+    return [];
+  }
+
+  const exact = state.itemMappingExact?.get(normalized) || [];
+  if (exact.length) {
+    return exact.map((entry) => buildResolvedAliasItems(keyword, entry)[0]);
+  }
+
+  const results = [];
+  for (const row of state.itemMappingEntries) {
+    const { itemId, zhName, enName, zhDescription, iconPath } = row;
+    const zhKey = normalizeSearchKey(zhName);
+    const enKey = normalizeSearchKey(enName);
+    if (!zhKey.includes(normalized) && !enKey.includes(normalized)) {
+      continue;
+    }
+    const mappingAlias = {
+      itemId: Number(itemId),
+      name: String(zhName || ""),
+      englishName: String(enName || ""),
+      description: String(zhDescription || ""),
+      icon: iconPath ? `https://xivapi.com/i/${iconPath}` : "",
+      fast: true,
+    };
+    results.push({
+      ID: Number(itemId),
+      Name: String(zhName || ""),
+      Name_en: String(enName || ""),
+      Name_ja: "",
+      Description: String(zhDescription || ""),
+      Icon: mappingAlias.icon,
+      LevelItem: 0,
+      ItemUICategory: { Name: "双语映射" },
+      __mappingAlias: mappingAlias,
+    });
+    if (results.length >= 50) {
+      break;
+    }
+  }
+
+  return results;
+}
+
+async function searchItems(keyword, { allowDeepFallback = true } = {}) {
+  const exactAlias = resolveKnownItemAlias(keyword);
+  if (exactAlias) {
+    debugLog(`[searchItems:mapping-exact] keyword=${keyword} itemId=${exactAlias.itemId} english=${exactAlias.englishName}`);
+    return buildResolvedAliasItems(keyword, exactAlias);
+  }
+
+  const mapped = searchItemsFromMapping(keyword);
+  if (mapped.length) {
+    debugLog(`[searchItems:mapping-fuzzy] keyword=${keyword} count=${mapped.length}`);
+    return mapped;
+  }
+
+  debugLog(`[searchItems:start] keyword=${keyword}`);
+  const encoded = encodeURIComponent(keyword);
+  const columns = encodeURIComponent("ID,Name,Name_en,Name_ja,Icon,LevelItem,ItemUICategory.Name");
+  const primaryUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=chs&limit=50&columns=${columns}`;
+  const primary = await fetchJson(primaryUrl);
+  const results = primary.Results || [];
+  debugLog(`[searchItems:primary] keyword=${keyword} count=${results.length}`);
+
+  if (results.length > 0) {
+    return results;
+  }
+
+  const fallbackUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=en&limit=50&columns=${columns}`;
+  const fallback = await fetchJson(fallbackUrl);
+  const fallbackResults = fallback.Results || [];
+  debugLog(`[searchItems:fallback-en] keyword=${keyword} count=${fallbackResults.length}`);
+  if (fallbackResults.length > 0) {
+    return fallbackResults;
+  }
+
+  if (!allowDeepFallback) {
+    debugLog(`[searchItems:skip-deep-fallback] keyword=${keyword}`);
+    return [];
+  }
+
+  const wikiResolved = await resolveItemViaWikiFallback(keyword);
+  debugLog(`[searchItems:wiki-fallback-result] keyword=${keyword} success=${!!wikiResolved} itemId=${wikiResolved?.itemId ?? ""} english=${wikiResolved?.englishName ?? ""}`);
+  if (wikiResolved?.itemId) {
+    return buildResolvedAliasItems(keyword, {
+      itemId: wikiResolved.itemId,
+      name: wikiResolved.title || keyword,
+      englishName: wikiResolved.englishName || wikiResolved.title || keyword,
+      icon: "",
+      fast: true,
+      description: "该结果通过 Wiki -> 双语运行时缓存兜底解析得到。",
+    });
+  }
+
+  return [];
+}
+
+function resolveItemViaWikiFallback(keyword) {
+  const query = String(keyword || "").trim();
+  if (!query) {
+    return Promise.resolve(null);
+  }
+
+  debugLog(`[wikiFallback:http-begin] keyword=${keyword}`);
+  return fetch(`/__resolve_item`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({ Query: query }),
+    })
+    .then(async (response) => {
+      debugLog(`[wikiFallback:http-status] keyword=${keyword} status=${response.status}`);
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        debugLog(`[wikiFallback:http-nonok-body] keyword=${keyword} body=${text}`);
+        return null;
+      }
+
+      const data = await response.json();
+      debugLog(`[wikiFallback:http-result] keyword=${keyword} success=${!!data?.success} itemId=${data?.itemId ?? ""} english=${data?.englishName ?? ""}`);
+      return (data && (data.success || data.itemId || data.title || data.url || data.englishName)) ? data : null;
+    })
+    .catch((error) => {
+      debugLog(`[wikiFallback:http-error] keyword=${keyword} error=${error?.message || error}`);
+      return null;
+    });
+}
+
+async function tryResolveAmbiguousViaWiki(keyword) {
+  const wikiResolved = await resolveItemViaWikiFallback(keyword);
+  if (!wikiResolved) {
+    return null;
+  }
+
+  if (wikiResolved.itemId) {
+    const entry = buildResolvedAliasItems(keyword, {
+      itemId: wikiResolved.itemId,
+      name: wikiResolved.title || keyword,
+      englishName: wikiResolved.englishName || wikiResolved.title || keyword,
+      icon: "",
+      fast: true,
+      description: "该结果通过国服 Wiki 二次兜底解析得到。",
+    })[0];
+
+    return {
+      type: "item",
+      id: entry.ID,
+      name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
+      subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
+      icon: entry.Icon,
+      raw: entry,
+    };
+  }
+
+  if (wikiResolved.title || wikiResolved.url) {
+    return {
+      type: "wiki",
+      id: 0,
+      name: wikiResolved.title || keyword,
+      subtitle: "国服 Wiki 命中结果，当前无法直接映射为可定价物品，可先打开 Wiki 继续确认",
+      icon: "",
+      raw: {
+        wikiUrl: wikiResolved.url || buildWikiSearchUrl(keyword),
+      },
+    };
+  }
+
+  return null;
+}
+
+function renderSearchResults(results) {
+  if (!results.length) {
+    dom.searchResults.classList.add("hidden");
+    dom.searchResults.innerHTML = "";
+    return;
+  }
+
+  dom.searchResults.innerHTML = "";
+  const fragment = document.createDocumentFragment();
+
+  for (const entry of results) {
+    const node = dom.resultTemplate.content.firstElementChild.cloneNode(true);
+    const icon = node.querySelector(".result-item__icon");
+    const name = node.querySelector(".result-item__name");
+    const meta = node.querySelector(".result-item__meta");
+    const typeLabel = entry.type === "quest" ? "任务" : entry.type === "wiki" ? "Wiki" : "物品";
+
+    icon.style.backgroundImage = `url(${toIconUrl(entry.icon)})`;
+    name.textContent = entry.name;
+    meta.textContent = `${typeLabel} · ${entry.subtitle}`;
+
+    node.addEventListener("click", async () => {
+      dom.searchResults.classList.add("hidden");
+      dom.searchInput.value = entry.name;
+      if (entry.type === "quest") {
+        await loadQuestPage(entry.id);
+      } else if (entry.type === "wiki") {
+        openWikiSearch(entry.raw?.wikiUrl || entry.name);
+      } else {
+        await loadItemPage(entry.id);
+      }
+    });
+
+    fragment.appendChild(node);
+  }
+
+  dom.searchResults.appendChild(fragment);
+  dom.searchResults.classList.remove("hidden");
+}
+
+function renderAmbiguousSearchResult(keyword, results) {
+  const topResults = results.slice(0, 8);
+  const itemsMarkup = topResults.map((entry) => {
+    const typeLabel = entry.type === "quest" ? "任务" : entry.type === "wiki" ? "Wiki" : "物品";
+    const nameMarkup = entry.type === "wiki"
+      ? `<button type="button" class="link-button" data-wiki-search="${escapeHtml(entry.raw?.wikiUrl || entry.name)}">${escapeHtml(entry.name)}</button>`
+      : (renderRouteLink(entry.id, entry.name, entry.type === "quest" ? "quest" : "item") || escapeHtml(entry.name));
+    return `
+      <div class="ingredient">
+        <span class="ingredient__name">${nameMarkup}</span>
+        <span class="ingredient__amount">${escapeHtml(typeLabel)}</span>
+      </div>
+    `;
+  }).join("");
+
+  const wikiButton = `
+    <div class="link-row">
+      <button type="button" class="link-button" data-wiki-search="${escapeHtml(keyword)}">在软件内打开国服 Wiki 搜索</button>
+    </div>
+  `;
+
+  const markup = `
+    <div class="notice notice--soft">
+      “${escapeHtml(keyword)}” 当前命中了相关条目，但没有足够把握自动跳转到准确物品。
+    </div>
+    <div class="subsection">
+      <h3 class="subsection__title">相关候选</h3>
+      <div class="ingredient-list">${itemsMarkup}</div>
+    </div>
+    ${wikiButton}
+  `;
+
+  dom.itemOverview.innerHTML = wrapCard("搜索结果", "需要你确认准确条目", markup);
+  dom.marketOverview.innerHTML = wrapCard("详情面板", "等待选择", `<div class="notice notice--soft">请点击上方候选条目，或直接打开软件内国服 Wiki 搜索继续确认。</div>`);
+  dom.obtainPanel.innerHTML = wrapCard("获取方式", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示获取方式。</div>`);
+  dom.craftPanel.innerHTML = wrapCard("制作配方", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示制作配方。</div>`);
+  dom.usagePanel.innerHTML = wrapCard("用途", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示用途。</div>`);
+  dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">请先从候选列表中选择准确物品</td></tr>`;
 }
