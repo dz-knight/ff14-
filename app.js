@@ -772,6 +772,16 @@ async function searchItems(keyword, { allowDeepFallback = true } = {}) {
 function normalizeSearchKey(value) {
   return String(value || "")
     .normalize("NFKC")
+    .replace(/[壹壱]/g, "一")
+    .replace(/[贰貳弐]/g, "二")
+    .replace(/[叁參参]/g, "三")
+    .replace(/肆/g, "四")
+    .replace(/伍/g, "五")
+    .replace(/[陆陸]/g, "六")
+    .replace(/柒/g, "七")
+    .replace(/捌/g, "八")
+    .replace(/玖/g, "九")
+    .replace(/拾/g, "十")
     .replace(/\s+/g, "")
     .trim()
     .toLowerCase();
@@ -2667,3 +2677,252 @@ function renderAmbiguousSearchResult(keyword, results) {
   dom.usagePanel.innerHTML = wrapCard("用途", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示用途。</div>`);
   dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">请先从候选列表中选择准确物品</td></tr>`;
 }
+// HQ / NQ market quality overrides
+function getActiveMarketQuality() {
+  return state.selectedMarketQuality || "all";
+}
+
+function setActiveMarketQuality(value) {
+  state.selectedMarketQuality = value || "all";
+}
+
+function createEmptyQualityStats() {
+  return {
+    all: { listingIds: new Set(), minPrice: null, listingCount: 0, unitsForSale: 0 },
+    hq: { listingIds: new Set(), minPrice: null, listingCount: 0, unitsForSale: 0 },
+    nq: { listingIds: new Set(), minPrice: null, listingCount: 0, unitsForSale: 0 },
+  };
+}
+
+function accumulateQualityStat(bucket, listing, listingId) {
+  if (bucket.listingIds.has(listingId)) {
+    return;
+  }
+
+  bucket.listingIds.add(listingId);
+  bucket.listingCount += 1;
+  bucket.unitsForSale += Number(listing.quantity || 0);
+  const price = Number(listing.pricePerUnit);
+  if (bucket.minPrice == null || price < bucket.minPrice) {
+    bucket.minPrice = price;
+  }
+}
+
+function finalizeQualityStats(stats) {
+  const toPublic = (bucket) => ({
+    minPrice: bucket.minPrice,
+    listingCount: bucket.listingCount,
+    unitsForSale: bucket.unitsForSale,
+  });
+
+  return {
+    all: toPublic(stats.all),
+    hq: toPublic(stats.hq),
+    nq: toPublic(stats.nq),
+  };
+}
+
+function getSelectedQualityStat(row) {
+  const quality = getActiveMarketQuality();
+  return row?.qualityStats?.[quality] || row?.qualityStats?.all || {
+    minPrice: null,
+    listingCount: 0,
+    unitsForSale: 0,
+  };
+}
+
+function getQualityOptions(item) {
+  return item?.CanBeHq
+    ? [
+        { key: "all", label: "全部" },
+        { key: "hq", label: "HQ" },
+        { key: "nq", label: "非 HQ" },
+      ]
+    : [{ key: "all", label: "全部" }];
+}
+
+function getMarketModeLabel() {
+  const quality = getActiveMarketQuality();
+  if (quality === "hq") return "HQ";
+  if (quality === "nq") return "非 HQ";
+  return "全部";
+}
+
+function buildWorldRowsFromPayload(dataCenter, payload) {
+  const listings = Array.isArray(payload.listings) ? payload.listings : [];
+  const uploadTimes = payload.worldUploadTimes || {};
+  const grouped = new Map();
+
+  for (const listing of listings) {
+    const worldId = Number(listing.worldID);
+    const listingId = listing.listingID || `${worldId}-${listing.pricePerUnit}-${listing.quantity}`;
+    if (!grouped.has(worldId)) {
+      grouped.set(worldId, { stats: createEmptyQualityStats() });
+    }
+
+    const record = grouped.get(worldId);
+    if (record.stats.all.listingIds.has(listingId)) {
+      continue;
+    }
+
+    const qualityKey = listing.hq ? "hq" : "nq";
+    accumulateQualityStat(record.stats.all, listing, listingId);
+    accumulateQualityStat(record.stats[qualityKey], listing, listingId);
+  }
+
+  return dataCenter.worlds.map((worldId) => {
+    const world = state.worldMap.get(worldId);
+    const record = grouped.get(worldId);
+    const qualityStats = record?.stats ? finalizeQualityStats(record.stats) : finalizeQualityStats(createEmptyQualityStats());
+    return {
+      worldId,
+      worldName: world?.name || `#${worldId}`,
+      region: world?.region || dataCenter.region,
+      dataCenter: dataCenter.name,
+      minPrice: qualityStats.all.minPrice,
+      listingCount: qualityStats.all.listingCount,
+      unitsForSale: qualityStats.all.unitsForSale,
+      qualityStats,
+      lastUploadTime: Number(uploadTimes[worldId] || 0) || null,
+    };
+  });
+}
+
+function buildEmptyWorldRow(dataCenter, worldId) {
+  const world = state.worldMap.get(worldId);
+  return {
+    worldId,
+    worldName: world?.name || `#${worldId}`,
+    region: world?.region || dataCenter.region,
+    dataCenter: dataCenter.name,
+    minPrice: null,
+    listingCount: 0,
+    unitsForSale: 0,
+    qualityStats: finalizeQualityStats(createEmptyQualityStats()),
+    lastUploadTime: null,
+  };
+}
+
+function summarizeRegions(worldRows) {
+  const buckets = new Map();
+  for (const row of worldRows) {
+    if (!buckets.has(row.region)) {
+      buckets.set(row.region, []);
+    }
+    buckets.get(row.region).push(row);
+  }
+
+  return Array.from(buckets.entries()).map(([region, rows]) => {
+    const priced = rows
+      .filter((row) => getSelectedQualityStat(row).minPrice != null)
+      .sort((a, b) => getSelectedQualityStat(a).minPrice - getSelectedQualityStat(b).minPrice);
+    return {
+      region,
+      cheapestPrice: getSelectedQualityStat(priced[0] || {}).minPrice ?? null,
+    };
+  });
+}
+
+function renderMarketOverview(item, worldRows) {
+  if (!item?.CanBeHq) {
+    setActiveMarketQuality("all");
+  }
+
+  const rowsWithPrice = worldRows.filter((row) => getSelectedQualityStat(row).minPrice != null);
+  const cheapest = rowsWithPrice[0];
+  const regionsCovered = new Set(worldRows.map((row) => row.region)).size;
+  const listedWorlds = rowsWithPrice.length;
+  const totalListings = rowsWithPrice.reduce((sum, row) => sum + getSelectedQualityStat(row).listingCount, 0);
+  const totalUnits = rowsWithPrice.reduce((sum, row) => sum + getSelectedQualityStat(row).unitsForSale, 0);
+  const regionSummary = summarizeRegions(worldRows);
+  const qualityOptions = getQualityOptions(item);
+  const modeLabel = getMarketModeLabel();
+
+  const markup = `
+    <div class="market-quality-row">
+      ${qualityOptions.map((entry) => `
+        <button type="button" class="region-filter${getActiveMarketQuality() === entry.key ? " is-active" : ""}" data-market-quality="${entry.key}">${entry.label}</button>
+      `).join("")}
+    </div>
+    <div class="market-overview-grid">
+      <div class="metric-card">
+        <div class="metric-card__label">${escapeHtml(modeLabel)} 全服最低价</div>
+        <div class="metric-card__value">${cheapest ? formatPrice(getSelectedQualityStat(cheapest).minPrice) : "暂无上架"}</div>
+        <div class="metric-card__detail">${cheapest ? `${escapeHtml(cheapest.region)} / ${escapeHtml(cheapest.dataCenter)} / ${escapeHtml(cheapest.worldName)}` : `当前没有读取到该物品 ${escapeHtml(modeLabel)} 品质的市场板上架。`}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card__label">已覆盖世界服</div>
+        <div class="metric-card__value">${listedWorlds} / ${worldRows.length}</div>
+        <div class="metric-card__detail">发现价格的国服世界服 ${listedWorlds} 个，覆盖 1 个国服大区。</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card__label">${escapeHtml(modeLabel)} 总上架数</div>
+        <div class="metric-card__value">${formatNumber(totalListings)}</div>
+        <div class="metric-card__detail">汇总当前读取到的市场板记录。</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card__label">${escapeHtml(modeLabel)} 总库存量</div>
+        <div class="metric-card__value">${formatNumber(totalUnits)}</div>
+        <div class="metric-card__detail">按当前读取到的库存数量累计。</div>
+      </div>
+    </div>
+    <div class="market-chip-row">
+      ${regionSummary.map((entry) => `
+        <div class="market-chip">
+          <span>${escapeHtml(entry.region)}</span>
+          <strong>${entry.cheapestPrice != null ? formatPrice(entry.cheapestPrice) : "暂无"}</strong>
+        </div>
+      `).join("")}
+    </div>
+  `;
+
+  dom.marketOverview.innerHTML = wrapCard("市场总览", `${getPreferredItemName(item) || item.Name_en} ${modeLabel} 全区服价格`, markup);
+}
+
+function renderPriceTable() {
+  if (!state.currentWorldRows.length) {
+    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">当前页面没有价格数据</td></tr>`;
+    return;
+  }
+
+  const keyword = dom.worldFilter.value.trim().toLowerCase();
+  const rows = state.currentWorldRows.filter((row) => {
+    const matchesRegion = state.selectedRegion === "全部" || row.region === state.selectedRegion;
+    const haystack = `${row.region} ${row.dataCenter} ${row.worldName}`.toLowerCase();
+    return matchesRegion && (!keyword || haystack.includes(keyword));
+  });
+
+  if (!rows.length) {
+    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">没有符合当前筛选条件的数据</td></tr>`;
+    return;
+  }
+
+  dom.priceTableBody.innerHTML = rows.map((row) => {
+    const stat = getSelectedQualityStat(row);
+    return `
+      <tr>
+        <td>${escapeHtml(row.region)}</td>
+        <td>${escapeHtml(row.dataCenter)}</td>
+        <td>${escapeHtml(row.worldName)}</td>
+        <td><span class="price-value ${stat.minPrice == null ? "is-missing" : ""}">${stat.minPrice == null ? "暂无上架" : formatPrice(stat.minPrice)}</span></td>
+        <td>${formatNumber(stat.listingCount)}</td>
+        <td>${formatNumber(stat.unitsForSale)}</td>
+        <td>${formatTime(row.lastUploadTime)}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+document.addEventListener("click", (event) => {
+  const qualityTarget = event.target instanceof Element ? event.target.closest("[data-market-quality]") : null;
+  if (!qualityTarget) {
+    return;
+  }
+
+  event.preventDefault();
+  setActiveMarketQuality(qualityTarget.getAttribute("data-market-quality") || "all");
+  if (state.currentEntity?.type === "item") {
+    renderMarketOverview(state.currentEntity.data, state.currentWorldRows);
+  }
+  renderPriceTable();
+});

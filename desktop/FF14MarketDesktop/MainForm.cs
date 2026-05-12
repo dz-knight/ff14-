@@ -57,12 +57,6 @@ internal sealed class MainForm : Form
         _goButton = new ToolStripButton("打开");
         _wikiSearchButton = new ToolStripButton("Wiki 搜索");
 
-        marketButton.Click += (_, _) => _tabs.SelectedIndex = 0;
-        wikiButton.Click += (_, _) => _tabs.SelectedIndex = 1;
-        _goButton.Click += (_, _) => NavigateFromAddressBox();
-        _wikiSearchButton.Click += (_, _) => SearchInWiki(_addressBox.Text);
-        _addressBox.KeyDown += AddressBoxOnKeyDown;
-
         topBar.Items.Add(marketButton);
         topBar.Items.Add(wikiButton);
         topBar.Items.Add(new ToolStripSeparator());
@@ -75,6 +69,11 @@ internal sealed class MainForm : Form
             Dock = DockStyle.Fill,
         };
         _tabs.SelectedIndexChanged += (_, _) => SyncToolbarForTab();
+        marketButton.Click += (_, _) => _tabs.SelectedIndex = 0;
+        wikiButton.Click += (_, _) => _tabs.SelectedIndex = 1;
+        _goButton.Click += (_, _) => NavigateFromAddressBox();
+        _wikiSearchButton.Click += (_, _) => SearchInWiki(_addressBox.Text);
+        _addressBox.KeyDown += AddressBoxOnKeyDown;
 
         var marketTab = new TabPage("价格百科");
         var wikiTab = new TabPage("国服 Wiki");

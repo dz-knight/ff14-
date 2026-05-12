@@ -567,6 +567,13 @@ input {
   margin-top: 16px;
 }
 
+.market-quality-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
 .table-actions {
   min-width: min(360px, 100%);
 }
