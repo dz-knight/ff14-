@@ -4,6 +4,7 @@
 
 - Added `全部 / HQ / 非 HQ` market quality filters to the item price view
 - Split market summary and world price table statistics by selected quality mode
+- Fixed the desktop world price table sorting so `HQ / 非 HQ` mode now orders rows by the selected quality's lowest price
 - Normalized Chinese variant numerals in item search, so queries like `神眼魔晶石三型` correctly match names such as `神眼魔晶石叁型`
 - Cleaned up desktop build warnings; current `Release` build completes with `0 warnings / 0 errors`
 

@@ -2828,7 +2828,16 @@ function renderMarketOverview(item, worldRows) {
     setActiveMarketQuality("all");
   }
 
-  const rowsWithPrice = worldRows.filter((row) => getSelectedQualityStat(row).minPrice != null);
+  const rowsWithPrice = worldRows
+    .filter((row) => getSelectedQualityStat(row).minPrice != null)
+    .sort((left, right) => {
+      const leftStat = getSelectedQualityStat(left);
+      const rightStat = getSelectedQualityStat(right);
+      if (leftStat.minPrice !== rightStat.minPrice) {
+        return (leftStat.minPrice || Number.MAX_SAFE_INTEGER) - (rightStat.minPrice || Number.MAX_SAFE_INTEGER);
+      }
+      return left.worldName.localeCompare(right.worldName, "zh-CN");
+    });
   const cheapest = rowsWithPrice[0];
   const regionsCovered = new Set(worldRows.map((row) => row.region)).size;
   const listedWorlds = rowsWithPrice.length;
@@ -2926,3 +2935,51 @@ document.addEventListener("click", (event) => {
   }
   renderPriceTable();
 });
+
+function renderPriceTable() {
+  if (!state.currentWorldRows.length) {
+    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">褰撳墠椤甸潰娌℃湁浠锋牸鏁版嵁</td></tr>`;
+    return;
+  }
+
+  const keyword = dom.worldFilter.value.trim().toLowerCase();
+  const rows = state.currentWorldRows
+    .filter((row) => {
+      const matchesRegion = state.selectedRegion === "鍏ㄩ儴" || row.region === state.selectedRegion;
+      const haystack = `${row.region} ${row.dataCenter} ${row.worldName}`.toLowerCase();
+      return matchesRegion && (!keyword || haystack.includes(keyword));
+    })
+    .sort((left, right) => {
+      const leftStat = getSelectedQualityStat(left);
+      const rightStat = getSelectedQualityStat(right);
+      const leftMissing = leftStat.minPrice == null ? 1 : 0;
+      const rightMissing = rightStat.minPrice == null ? 1 : 0;
+      if (leftMissing !== rightMissing) {
+        return leftMissing - rightMissing;
+      }
+      if (leftStat.minPrice !== rightStat.minPrice) {
+        return (leftStat.minPrice || Number.MAX_SAFE_INTEGER) - (rightStat.minPrice || Number.MAX_SAFE_INTEGER);
+      }
+      return left.worldName.localeCompare(right.worldName, "zh-CN");
+    });
+
+  if (!rows.length) {
+    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">娌℃湁绗﹀悎褰撳墠绛涢€夋潯浠剁殑鏁版嵁</td></tr>`;
+    return;
+  }
+
+  dom.priceTableBody.innerHTML = rows.map((row) => {
+    const stat = getSelectedQualityStat(row);
+    return `
+      <tr>
+        <td>${escapeHtml(row.region)}</td>
+        <td>${escapeHtml(row.dataCenter)}</td>
+        <td>${escapeHtml(row.worldName)}</td>
+        <td><span class="price-value ${stat.minPrice == null ? "is-missing" : ""}">${stat.minPrice == null ? "鏆傛棤涓婃灦" : formatPrice(stat.minPrice)}</span></td>
+        <td>${formatNumber(stat.listingCount)}</td>
+        <td>${formatNumber(stat.unitsForSale)}</td>
+        <td>${formatTime(row.lastUploadTime)}</td>
+      </tr>
+    `;
+  }).join("");
+}
