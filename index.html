@@ -19,7 +19,7 @@
           <h1>FF14 物价百科</h1>
           <p class="hero__summary">
             一个用 <span>HTML + JavaScript</span> 重做的本地百科前端。
-            现在只保留中国国服数据，支持物品和任务搜索，并且每个结果都能跳到独立详情页。
+            现在只保留中国国服数据，支持物品与任务搜索，并且每个结果都能跳转到独立详情页。
           </p>
           <div class="hero__stats" id="hero-stats">
             <div class="stat-pill">
@@ -32,13 +32,19 @@
             </div>
             <div class="stat-pill">
               <span class="stat-pill__label">构建</span>
-              <span class="stat-pill__value">v1.0.1</span>
+              <span class="stat-pill__value">v1.0.2</span>
             </div>
           </div>
         </div>
 
         <div class="search-panel">
-          <label class="search-panel__label" for="item-search">搜索物品或任务</label>
+          <div class="search-panel__header">
+            <label class="search-panel__label" for="item-search">搜索物品或任务</label>
+            <div class="theme-switch" id="theme-switch" role="group" aria-label="主题颜色">
+              <button type="button" class="theme-switch__button" data-theme-option="light">白天</button>
+              <button type="button" class="theme-switch__button" data-theme-option="dark">黑夜</button>
+            </div>
+          </div>
           <div class="search-panel__bar">
             <input id="item-search" type="search" placeholder="输入物品名，或输入任务:66358 直接打开任务" autocomplete="off">
             <button id="search-button" type="button">搜索</button>
@@ -154,6 +160,6 @@
     </button>
   </template>
 
-  <script src="./app.js?v=20260508-v101"></script>
+  <script src="./app.js?v=20260520-v102"></script>
 </body>
 </html>

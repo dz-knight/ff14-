@@ -1,4 +1,4 @@
-const ENCYCLOPEDIA_API = "https://cafemaker.wakingsands.com";
+﻿const ENCYCLOPEDIA_API = "https://cafemaker.wakingsands.com";
 const MARKET_API = "https://universalis.app/api/v2";
 const DEFAULT_ITEM_ID = 5114;
 const DEFAULT_ITEM_NAME = "秘银矿";
@@ -6,6 +6,7 @@ const CN_REGION_NAME = "中国";
 const SEARCH_HISTORY_KEY = "ff14_market_search_history_v1";
 const SEARCH_HISTORY_LIMIT = 12;
 const DEBUG_LOG_KEY = "ff14_market_debug_log_v1";
+const THEME_PREFERENCE_KEY = "ff14_market_theme_v1";
 const FETCH_LIMITS = {
   usageRecipes: 120,
   craftRecipes: 40,
@@ -30,6 +31,8 @@ const state = {
   pendingWikiResolve: new Map(),
   resolvedAliases: new Map(),
   resolvedQueries: new Map(),
+  selectedMarketQuality: "all",
+  theme: "light",
   caches: {
     item: new Map(),
     quest: new Map(),
@@ -48,6 +51,7 @@ const dom = {
   searchButton: document.getElementById("search-button"),
   searchResults: document.getElementById("search-results"),
   searchHistory: document.getElementById("search-history"),
+  themeSwitch: document.getElementById("theme-switch"),
   worldFilter: document.getElementById("world-filter"),
   priceTableBody: document.getElementById("price-table-body"),
   itemOverview: document.getElementById("item-overview"),
@@ -171,6 +175,7 @@ document.addEventListener("DOMContentLoaded", bootstrap);
 window.addEventListener("popstate", () => loadFromUrl({ replace: true }));
 
 async function bootstrap() {
+  initializeTheme();
   renderRegionFilters(["全部"]);
   bindEvents();
   renderSearchHistory();
@@ -190,6 +195,11 @@ async function bootstrap() {
 }
 
 function bindEvents() {
+  dom.themeSwitch?.querySelectorAll("[data-theme-option]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setThemePreference(button.getAttribute("data-theme-option") || "light");
+    });
+  });
   dom.searchButton.addEventListener("click", () => performSearch(dom.searchInput.value.trim()));
   dom.searchInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -872,69 +882,6 @@ function renderSearchResults(results) {
   dom.searchResults.classList.remove("hidden");
 }
 
-function resolveItemViaWikiFallback(keyword) {
-  const query = String(keyword || "").trim();
-  if (!query) {
-    return Promise.resolve(null);
-  }
-
-  debugLog(`[wikiFallback:http-begin] keyword=${keyword}`);
-  return fetch(`/__resolve_item`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify({ Query: query }),
-    })
-    .then(async (response) => {
-      debugLog(`[wikiFallback:http-status] keyword=${keyword} status=${response.status}`);
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        debugLog(`[wikiFallback:http-nonok-body] keyword=${keyword} body=${text}`);
-        return null;
-      }
-      const data = await response.json();
-      debugLog(`[wikiFallback:http-result] keyword=${keyword} success=${!!data?.success} itemId=${data?.itemId ?? ""} english=${data?.englishName ?? ""}`);
-      return data && data.success ? data : null;
-    })
-    .catch((error) => {
-      debugLog(`[wikiFallback:http-error] keyword=${keyword} error=${error?.message || error}`);
-      return null;
-    });
-}
-
-function resolveItemViaWikiFallback(keyword) {
-  const query = String(keyword || "").trim();
-  if (!query) {
-    return Promise.resolve(null);
-  }
-
-  debugLog(`[wikiFallback:http-begin] keyword=${keyword}`);
-  return fetch(`/__resolve_item`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify({ Query: query }),
-    })
-    .then(async (response) => {
-      debugLog(`[wikiFallback:http-status] keyword=${keyword} status=${response.status}`);
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        debugLog(`[wikiFallback:http-nonok-body] keyword=${keyword} body=${text}`);
-        return null;
-      }
-
-      const data = await response.json();
-      debugLog(`[wikiFallback:http-result] keyword=${keyword} success=${!!data?.success} itemId=${data?.itemId ?? ""} english=${data?.englishName ?? ""}`);
-      return (data && (data.success || data.itemId || data.title || data.url || data.englishName)) ? data : null;
-    })
-    .catch((error) => {
-      debugLog(`[wikiFallback:http-error] keyword=${keyword} error=${error?.message || error}`);
-      return null;
-    });
-}
-
 function debugLog(message) {
   try {
     const current = loadDebugLog();
@@ -962,6 +909,44 @@ function loadDebugLog() {
   } catch {
     return [];
   }
+}
+
+function initializeTheme() {
+  const saved = loadThemePreference();
+  applyTheme(saved);
+}
+
+function loadThemePreference() {
+  try {
+    const saved = localStorage.getItem(THEME_PREFERENCE_KEY);
+    return saved === "dark" ? "dark" : "light";
+  } catch {
+    return "light";
+  }
+}
+
+function setThemePreference(theme) {
+  const nextTheme = theme === "dark" ? "dark" : "light";
+  try {
+    localStorage.setItem(THEME_PREFERENCE_KEY, nextTheme);
+  } catch {
+    // ignore storage failures
+  }
+  applyTheme(nextTheme);
+}
+
+function applyTheme(theme) {
+  state.theme = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = state.theme;
+  syncThemeSwitch();
+}
+
+function syncThemeSwitch() {
+  dom.themeSwitch?.querySelectorAll("[data-theme-option]").forEach((button) => {
+    const isActive = button.getAttribute("data-theme-option") === state.theme;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
 }
 
 function renderSearchHistory() {
@@ -1461,7 +1446,7 @@ function renderItemOverview(item) {
         <div class="link-row">
           <a class="link-button" href="?type=item&id=${encodeURIComponent(item.ID)}&name=${encodeURIComponent(itemName)}">当前物品详情</a>
           ${renderExternalButton(`https://universalis.app/market/${item.ID}`, "打开市场板")}
-          ${renderExternalButton(buildWikiSearchUrl(itemName), "国服 Wiki 搜索")}
+          ${renderWikiOpenButton(buildWikiArticleUrl(itemName, "物品"))}
         </div>
       </div>
     </div>
@@ -1502,58 +1487,13 @@ function renderQuestOverview(quest) {
         </p>
         <div class="link-row">
           <a class="link-button" href="?type=quest&id=${encodeURIComponent(quest.ID)}&name=${encodeURIComponent(quest.Name || quest.Name_en || "")}">当前任务详情</a>
-          ${renderExternalButton(buildWikiSearchUrl(quest.Name || quest.Name_en), "国服 Wiki 搜索")}
+          ${renderWikiOpenButton(quest.Name || quest.Name_en)}
         </div>
       </div>
     </div>
   `;
 
   dom.itemOverview.innerHTML = wrapCard("任务详情", questName, markup);
-}
-
-function renderMarketOverview(item, worldRows) {
-  const rowsWithPrice = worldRows.filter((row) => row.minPrice != null);
-  const cheapest = rowsWithPrice[0];
-  const regionsCovered = new Set(worldRows.map((row) => row.region)).size;
-  const listedWorlds = rowsWithPrice.length;
-  const totalListings = rowsWithPrice.reduce((sum, row) => sum + row.listingCount, 0);
-  const totalUnits = rowsWithPrice.reduce((sum, row) => sum + row.unitsForSale, 0);
-  const regionSummary = summarizeRegions(worldRows);
-
-  const markup = `
-    <div class="market-overview-grid">
-      <div class="metric-card">
-        <div class="metric-card__label">全服最低价</div>
-        <div class="metric-card__value">${cheapest ? formatPrice(cheapest.minPrice) : "暂无上架"}</div>
-        <div class="metric-card__detail">${cheapest ? `${escapeHtml(cheapest.region)} / ${escapeHtml(cheapest.dataCenter)} / ${escapeHtml(cheapest.worldName)}` : "当前没有读取到该物品的市场板上架。"}</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-card__label">已覆盖世界服</div>
-        <div class="metric-card__value">${listedWorlds} / ${worldRows.length}</div>
-        <div class="metric-card__detail">发现价格的国服世界服 ${listedWorlds} 个，覆盖 ${regionsCovered} 个国服大区。</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-card__label">总上架数</div>
-        <div class="metric-card__value">${formatNumber(totalListings)}</div>
-        <div class="metric-card__detail">汇总当前读取到的市场板记录。</div>
-      </div>
-      <div class="metric-card">
-        <div class="metric-card__label">总库存量</div>
-        <div class="metric-card__value">${formatNumber(totalUnits)}</div>
-        <div class="metric-card__detail">按当前读取到的库存数量累计。</div>
-      </div>
-    </div>
-    <div class="market-chip-row">
-      ${regionSummary.map((entry) => `
-        <div class="market-chip">
-          <span>${escapeHtml(entry.region)}</span>
-          <strong>${entry.cheapestPrice != null ? formatPrice(entry.cheapestPrice) : "暂无"}</strong>
-        </div>
-      `).join("")}
-    </div>
-  `;
-
-  dom.marketOverview.innerHTML = wrapCard("市场总览", `${getPreferredItemName(item) || item.Name_en} 全区服价格`, markup);
 }
 
 function renderQuestPanels(quest, questChain) {
@@ -1621,7 +1561,7 @@ function renderQuestPanels(quest, questChain) {
         <h3 class="source-card__title">继续搜索相关内容</h3>
         <div class="link-row">
           <a class="link-button" href="?q=${encodeURIComponent(quest.Name || quest.Name_en || "")}">重新搜索同名内容</a>
-          ${renderExternalButton(buildWikiSearchUrl(quest.Name || quest.Name_en), "国服 Wiki 搜索")}
+          ${renderWikiOpenButton(quest.Name || quest.Name_en)}
         </div>
       </div>
     </div>
@@ -2073,37 +2013,6 @@ function summarizeRegions(worldRows) {
   });
 }
 
-function renderPriceTable() {
-  if (!state.currentWorldRows.length) {
-    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">当前页面没有价格数据</td></tr>`;
-    return;
-  }
-
-  const keyword = dom.worldFilter.value.trim().toLowerCase();
-  const rows = state.currentWorldRows.filter((row) => {
-    const matchesRegion = state.selectedRegion === "全部" || row.region === state.selectedRegion;
-    const haystack = `${row.region} ${row.dataCenter} ${row.worldName}`.toLowerCase();
-    return matchesRegion && (!keyword || haystack.includes(keyword));
-  });
-
-  if (!rows.length) {
-    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">没有符合当前筛选条件的数据</td></tr>`;
-    return;
-  }
-
-  dom.priceTableBody.innerHTML = rows.map((row) => `
-    <tr>
-      <td>${escapeHtml(row.region)}</td>
-      <td>${escapeHtml(row.dataCenter)}</td>
-      <td>${escapeHtml(row.worldName)}</td>
-      <td><span class="price-value ${row.minPrice == null ? "is-missing" : ""}">${row.minPrice == null ? "暂无上架" : formatPrice(row.minPrice)}</span></td>
-      <td>${formatNumber(row.listingCount)}</td>
-      <td>${formatNumber(row.unitsForSale)}</td>
-      <td>${formatTime(row.lastUploadTime)}</td>
-    </tr>
-  `).join("");
-}
-
 function renderRegionFilters(regionNames) {
   dom.regionFilters.innerHTML = "";
   const fragment = document.createDocumentFragment();
@@ -2230,8 +2139,21 @@ function renderExternalButton(url, label) {
   return `<a class="link-button" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
 }
 
+function renderWikiOpenButton(query, label = "打开国服 Wiki") {
+  return `<button type="button" class="link-button" data-wiki-search="${escapeHtml(query || "")}">${escapeHtml(label)}</button>`;
+}
+
 function buildWikiSearchUrl(name) {
   return `https://ff14.huijiwiki.com/index.php?search=${encodeURIComponent(name || "")}`;
+}
+
+function buildWikiArticleUrl(name, namespace = "") {
+  const title = String(name || "").trim();
+  const prefix = String(namespace || "").trim();
+  const pageTitle = prefix ? `${prefix}:${title}` : title;
+  return title
+    ? `https://ff14.huijiwiki.com/wiki/${encodeURIComponent(pageTitle).replace(/%20/g, "_")}`
+    : buildWikiSearchUrl(title);
 }
 
 function toIconUrl(iconPath) {
@@ -2295,13 +2217,19 @@ function getPreferredItemName(item) {
   return aliasMeta?.preferredName || item?.Name || item?.Name_en || "";
 }
 
-function openWikiSearch(query) {
+async function openWikiSearch(query) {
   const text = String(query || "").trim();
   if (!text) {
     return;
   }
 
-  const target = /^https?:\/\//i.test(text) ? text : buildWikiSearchUrl(text);
+  if (/^https?:\/\//i.test(text)) {
+    window.open(text, "_blank", "noopener,noreferrer");
+    return;
+  }
+
+  const resolved = await resolveItemViaWikiFallback(text).catch(() => null);
+  const target = resolved?.url || buildWikiArticleUrl(text) || buildWikiSearchUrl(text);
   window.open(target, "_blank", "noopener,noreferrer");
 }
 
@@ -2862,7 +2790,7 @@ function renderMarketOverview(item, worldRows) {
       <div class="metric-card">
         <div class="metric-card__label">已覆盖世界服</div>
         <div class="metric-card__value">${listedWorlds} / ${worldRows.length}</div>
-        <div class="metric-card__detail">发现价格的国服世界服 ${listedWorlds} 个，覆盖 1 个国服大区。</div>
+        <div class="metric-card__detail">发现价格的国服世界服 ${listedWorlds} 个，覆盖 ${regionsCovered} 个国服大区。</div>
       </div>
       <div class="metric-card">
         <div class="metric-card__label">${escapeHtml(modeLabel)} 总上架数</div>
@@ -2895,11 +2823,25 @@ function renderPriceTable() {
   }
 
   const keyword = dom.worldFilter.value.trim().toLowerCase();
-  const rows = state.currentWorldRows.filter((row) => {
-    const matchesRegion = state.selectedRegion === "全部" || row.region === state.selectedRegion;
-    const haystack = `${row.region} ${row.dataCenter} ${row.worldName}`.toLowerCase();
-    return matchesRegion && (!keyword || haystack.includes(keyword));
-  });
+  const rows = state.currentWorldRows
+    .filter((row) => {
+      const matchesRegion = state.selectedRegion === "全部" || row.region === state.selectedRegion;
+      const haystack = `${row.region} ${row.dataCenter} ${row.worldName}`.toLowerCase();
+      return matchesRegion && (!keyword || haystack.includes(keyword));
+    })
+    .sort((left, right) => {
+      const leftStat = getSelectedQualityStat(left);
+      const rightStat = getSelectedQualityStat(right);
+      const leftMissing = leftStat.minPrice == null ? 1 : 0;
+      const rightMissing = rightStat.minPrice == null ? 1 : 0;
+      if (leftMissing !== rightMissing) {
+        return leftMissing - rightMissing;
+      }
+      if (leftStat.minPrice !== rightStat.minPrice) {
+        return (leftStat.minPrice || Number.MAX_SAFE_INTEGER) - (rightStat.minPrice || Number.MAX_SAFE_INTEGER);
+      }
+      return left.worldName.localeCompare(right.worldName, "zh-CN");
+    });
 
   if (!rows.length) {
     dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">没有符合当前筛选条件的数据</td></tr>`;
@@ -2935,51 +2877,3 @@ document.addEventListener("click", (event) => {
   }
   renderPriceTable();
 });
-
-function renderPriceTable() {
-  if (!state.currentWorldRows.length) {
-    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">褰撳墠椤甸潰娌℃湁浠锋牸鏁版嵁</td></tr>`;
-    return;
-  }
-
-  const keyword = dom.worldFilter.value.trim().toLowerCase();
-  const rows = state.currentWorldRows
-    .filter((row) => {
-      const matchesRegion = state.selectedRegion === "鍏ㄩ儴" || row.region === state.selectedRegion;
-      const haystack = `${row.region} ${row.dataCenter} ${row.worldName}`.toLowerCase();
-      return matchesRegion && (!keyword || haystack.includes(keyword));
-    })
-    .sort((left, right) => {
-      const leftStat = getSelectedQualityStat(left);
-      const rightStat = getSelectedQualityStat(right);
-      const leftMissing = leftStat.minPrice == null ? 1 : 0;
-      const rightMissing = rightStat.minPrice == null ? 1 : 0;
-      if (leftMissing !== rightMissing) {
-        return leftMissing - rightMissing;
-      }
-      if (leftStat.minPrice !== rightStat.minPrice) {
-        return (leftStat.minPrice || Number.MAX_SAFE_INTEGER) - (rightStat.minPrice || Number.MAX_SAFE_INTEGER);
-      }
-      return left.worldName.localeCompare(right.worldName, "zh-CN");
-    });
-
-  if (!rows.length) {
-    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">娌℃湁绗﹀悎褰撳墠绛涢€夋潯浠剁殑鏁版嵁</td></tr>`;
-    return;
-  }
-
-  dom.priceTableBody.innerHTML = rows.map((row) => {
-    const stat = getSelectedQualityStat(row);
-    return `
-      <tr>
-        <td>${escapeHtml(row.region)}</td>
-        <td>${escapeHtml(row.dataCenter)}</td>
-        <td>${escapeHtml(row.worldName)}</td>
-        <td><span class="price-value ${stat.minPrice == null ? "is-missing" : ""}">${stat.minPrice == null ? "鏆傛棤涓婃灦" : formatPrice(stat.minPrice)}</span></td>
-        <td>${formatNumber(stat.listingCount)}</td>
-        <td>${formatNumber(stat.unitsForSale)}</td>
-        <td>${formatTime(row.lastUploadTime)}</td>
-      </tr>
-    `;
-  }).join("");
-}
