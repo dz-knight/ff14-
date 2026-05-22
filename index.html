@@ -32,7 +32,7 @@
             </div>
             <div class="stat-pill">
               <span class="stat-pill__label">构建</span>
-              <span class="stat-pill__value">v1.0.3</span>
+              <span class="stat-pill__value">v1.0.4</span>
             </div>
           </div>
         </div>
@@ -41,12 +41,19 @@
           <div class="search-panel__header">
             <label class="search-panel__label" for="item-search">搜索物品或任务</label>
             <div class="theme-switch" id="theme-switch" role="group" aria-label="主题颜色">
-              <button type="button" class="theme-switch__button" data-theme-option="light">白天</button>
-              <button type="button" class="theme-switch__button" data-theme-option="dark">黑夜</button>
-              <button type="button" class="theme-switch__button" data-theme-option="pink">粉色</button>
-              <button type="button" class="theme-switch__button" data-theme-option="blue">浅蓝</button>
-              <button type="button" class="theme-switch__button" data-theme-option="purple">紫色</button>
-              <button type="button" class="theme-switch__button" data-theme-option="green">浅绿</button>
+              <div class="theme-switch__modes">
+                <button type="button" class="theme-switch__button" data-theme-mode="light">浅色</button>
+                <button type="button" class="theme-switch__button" data-theme-mode="dark">深色</button>
+              </div>
+              <label class="theme-switch__picker" for="theme-color-picker">
+                <span class="theme-switch__caption">颜色盘</span>
+                <input id="theme-color-picker" class="theme-switch__swatch" type="color" value="#bb6b1f" aria-label="主题颜色选择器">
+              </label>
+              <div class="theme-switch__rgb">
+                <span class="theme-switch__caption">RGB</span>
+                <input id="theme-rgb-input" class="theme-switch__rgb-input" type="text" placeholder="255, 182, 193" aria-label="RGB 颜色代码">
+                <button id="theme-rgb-apply" class="theme-switch__apply" type="button">应用</button>
+              </div>
             </div>
           </div>
           <div class="search-panel__bar">

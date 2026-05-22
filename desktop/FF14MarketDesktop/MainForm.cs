@@ -22,6 +22,8 @@ internal sealed class MainForm : Form
     private readonly ToolStripButton _goButton;
     private readonly ToolStripButton _wikiSearchButton;
     private readonly ToolStripDropDownButton _opacityButton;
+    private readonly TrackBar _opacityTrackBar;
+    private readonly Label _opacityValueLabel;
     private readonly ToolStripLabel _previewTitleLabel;
     private readonly SemaphoreSlim _resolverGate = new(1, 1);
     private readonly TaskCompletionSource<bool> _resolverReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -59,20 +61,51 @@ internal sealed class MainForm : Form
         _wikiSearchButton = new ToolStripButton("Wiki 搜索");
         _opacityButton = new ToolStripDropDownButton("透明度 100%");
 
-        foreach (var choice in new (string Label, double Value)[]
+        _opacityTrackBar = new TrackBar
         {
-            ("100%", 1.00),
-            ("95%", 0.95),
-            ("90%", 0.90),
-            ("85%", 0.85),
-            ("80%", 0.80),
-            ("75%", 0.75),
-        })
+            Minimum = 10,
+            Maximum = 100,
+            TickFrequency = 10,
+            SmallChange = 1,
+            LargeChange = 5,
+            Value = 100,
+            AutoSize = false,
+            Width = 180,
+            Height = 36,
+        };
+        _opacityValueLabel = new Label
         {
-            var item = new ToolStripMenuItem(choice.Label);
-            item.Click += (_, _) => ApplyWindowOpacity(choice.Value);
-            _opacityButton.DropDownItems.Add(item);
-        }
+            AutoSize = false,
+            Width = 180,
+            Height = 20,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Text = "100%",
+        };
+        _opacityTrackBar.ValueChanged += (_, _) => ApplyWindowOpacity(_opacityTrackBar.Value / 100d, false);
+
+        var opacityPanel = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoSize = true,
+            Padding = new Padding(8),
+        };
+        opacityPanel.Controls.Add(new Label
+        {
+            AutoSize = true,
+            Text = "透明度",
+            Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(3, 0, 3, 4),
+        });
+        opacityPanel.Controls.Add(_opacityTrackBar);
+        opacityPanel.Controls.Add(_opacityValueLabel);
+        _opacityButton.DropDownItems.Add(new ToolStripControlHost(opacityPanel)
+        {
+            AutoSize = false,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            Size = new Size(210, 96),
+        });
 
         topBar.Items.Add(marketButton);
         topBar.Items.Add(wikiButton);
@@ -162,16 +195,18 @@ internal sealed class MainForm : Form
         ApplyWindowOpacity(1.0);
     }
 
-    private void ApplyWindowOpacity(double opacity)
+    private void ApplyWindowOpacity(double opacity, bool syncTrackBar = true)
     {
-        var nextOpacity = Math.Min(1.0, Math.Max(0.75, opacity));
+        var nextOpacity = Math.Min(1.0, Math.Max(0.10, opacity));
         Opacity = nextOpacity;
         _opacityButton.Text = $"透明度 {Math.Round(nextOpacity * 100):0}%";
-        foreach (ToolStripItem item in _opacityButton.DropDownItems)
+        _opacityValueLabel.Text = $"{Math.Round(nextOpacity * 100):0}%";
+        if (syncTrackBar)
         {
-            if (item is ToolStripMenuItem menuItem)
+            var nextValue = (int)Math.Round(nextOpacity * 100);
+            if (_opacityTrackBar.Value != nextValue)
             {
-                menuItem.Checked = string.Equals(menuItem.Text, $"{Math.Round(nextOpacity * 100):0}%", StringComparison.Ordinal);
+                _opacityTrackBar.Value = nextValue;
             }
         }
     }

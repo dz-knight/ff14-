@@ -7,6 +7,7 @@ const SEARCH_HISTORY_KEY = "ff14_market_search_history_v1";
 const SEARCH_HISTORY_LIMIT = 12;
 const DEBUG_LOG_KEY = "ff14_market_debug_log_v1";
 const THEME_PREFERENCE_KEY = "ff14_market_theme_v1";
+const DEFAULT_THEME_COLOR = "#bb6b1f";
 const FETCH_LIMITS = {
   usageRecipes: 120,
   craftRecipes: 40,
@@ -32,7 +33,8 @@ const state = {
   resolvedAliases: new Map(),
   resolvedQueries: new Map(),
   selectedMarketQuality: "all",
-  theme: "light",
+  themeMode: "light",
+  themeColor: DEFAULT_THEME_COLOR,
   caches: {
     item: new Map(),
     quest: new Map(),
@@ -52,6 +54,9 @@ const dom = {
   searchResults: document.getElementById("search-results"),
   searchHistory: document.getElementById("search-history"),
   themeSwitch: document.getElementById("theme-switch"),
+  themeColorPicker: document.getElementById("theme-color-picker"),
+  themeRgbInput: document.getElementById("theme-rgb-input"),
+  themeRgbApply: document.getElementById("theme-rgb-apply"),
   worldFilter: document.getElementById("world-filter"),
   priceTableBody: document.getElementById("price-table-body"),
   itemOverview: document.getElementById("item-overview"),
@@ -174,31 +179,27 @@ const questColumns = [
 document.addEventListener("DOMContentLoaded", bootstrap);
 window.addEventListener("popstate", () => loadFromUrl({ replace: true }));
 
-async function bootstrap() {
-  initializeTheme();
-  renderRegionFilters(["全部"]);
-  bindEvents();
-  renderSearchHistory();
-
-  try {
-    setBootStatus("正在载入区服映射");
-    await loadMarketMetadata();
-    renderRegionFilters(["全部", ...new Set(state.dataCenters.map((entry) => entry.region))]);
-    const cnWorldCount = state.dataCenters.reduce((sum, entry) => sum + entry.worlds.length, 0);
-    setBootStatus(`已载入国服 ${cnWorldCount} 个世界服`);
-    await loadFromUrl({ replace: true });
-  } catch (error) {
-    console.error(error);
-    setBootStatus("初始化失败");
-    renderFatalError(error);
-  }
-}
-
 function bindEvents() {
-  dom.themeSwitch?.querySelectorAll("[data-theme-option]").forEach((button) => {
+  dom.themeSwitch?.querySelectorAll("[data-theme-mode]").forEach((button) => {
     button.addEventListener("click", () => {
-      setThemePreference(button.getAttribute("data-theme-option") || "light");
+      setThemePreference({
+        mode: button.getAttribute("data-theme-mode") || "light",
+      });
     });
+  });
+  dom.themeColorPicker?.addEventListener("input", () => {
+    setThemePreference({
+      color: dom.themeColorPicker.value,
+    });
+  });
+  dom.themeRgbApply?.addEventListener("click", () => {
+    applyThemeColorInput();
+  });
+  dom.themeRgbInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applyThemeColorInput();
+    }
   });
   dom.searchButton.addEventListener("click", () => performSearch(dom.searchInput.value.trim()));
   dom.searchInput.addEventListener("keydown", (event) => {
@@ -519,188 +520,6 @@ function pickPreferredSearchResult(results, keyword) {
   };
 }
 
-function renderAmbiguousSearchResult(keyword, results) {
-  const topResults = results.slice(0, 8);
-  const itemsMarkup = topResults.map((entry) => {
-    const typeLabel = entry.type === "quest" ? "任务" : "物品";
-    return `
-      <div class="ingredient">
-        <span class="ingredient__name">${escapeHtml(entry.name)}</span>
-        <span class="ingredient__amount">${escapeHtml(typeLabel)}</span>
-      </div>
-    `;
-  }).join("");
-
-  const wikiButton = `
-    <div class="link-row">
-      <button type="button" class="link-button" data-wiki-search="${escapeHtml(keyword)}">在软件内打开国服 Wiki 搜索</button>
-    </div>
-  `;
-
-  const markup = `
-    <div class="notice notice--soft">
-      “${escapeHtml(keyword)}” 当前命中了相关条目，但没有足够把握自动跳转到准确物品。
-    </div>
-    <div class="subsection">
-      <h3 class="subsection__title">相关候选</h3>
-      <div class="ingredient-list">${itemsMarkup}</div>
-    </div>
-    ${wikiButton}
-  `;
-
-  dom.itemOverview.innerHTML = wrapCard("搜索结果", "需要你确认准确条目", markup);
-  dom.marketOverview.innerHTML = wrapCard("详情面板", "等待选择", `<div class="notice notice--soft">请点击上方搜索结果列表中的准确条目，或直接打开软件内 Wiki 搜索继续确认。</div>`);
-  dom.obtainPanel.innerHTML = wrapCard("获取方式", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示获取方式。</div>`);
-  dom.craftPanel.innerHTML = wrapCard("制作配方", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示制作配方。</div>`);
-  dom.usagePanel.innerHTML = wrapCard("用途", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示用途。</div>`);
-  dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">请先从候选列表中选择准确物品</td></tr>`;
-}
-
-async function tryResolveAmbiguousViaWiki(keyword) {
-  const wikiResolved = await resolveItemViaWikiFallback(keyword);
-  if (!wikiResolved?.itemId) {
-    return null;
-  }
-
-  const entry = buildResolvedAliasItems(keyword, {
-    itemId: wikiResolved.itemId,
-    name: wikiResolved.title || keyword,
-    englishName: wikiResolved.englishName || wikiResolved.title || keyword,
-    icon: "",
-    fast: true,
-    description: "该结果通过国服 Wiki 二次兜底解析得到。",
-  })[0];
-
-  return {
-    type: "item",
-    id: entry.ID,
-    name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
-    subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
-    icon: entry.Icon,
-    raw: entry,
-  };
-}
-
-function renderAmbiguousSearchResult(keyword, results) {
-  const topResults = results.slice(0, 8);
-  const itemsMarkup = topResults.map((entry) => {
-    const typeLabel = entry.type === "quest" ? "任务" : "物品";
-    const route = renderRouteLink(entry.id, entry.name, entry.type === "quest" ? "quest" : "item");
-    return `
-      <div class="ingredient">
-        <span class="ingredient__name">${route || escapeHtml(entry.name)}</span>
-        <span class="ingredient__amount">${escapeHtml(typeLabel)}</span>
-      </div>
-    `;
-  }).join("");
-
-  const wikiButton = `
-    <div class="link-row">
-      <button type="button" class="link-button" data-wiki-search="${escapeHtml(keyword)}">在软件内打开国服 Wiki 搜索</button>
-    </div>
-  `;
-
-  const markup = `
-    <div class="notice notice--soft">
-      “${escapeHtml(keyword)}” 当前命中了相关条目，但没有足够把握自动跳转到准确物品。
-    </div>
-    <div class="subsection">
-      <h3 class="subsection__title">相关候选</h3>
-      <div class="ingredient-list">${itemsMarkup}</div>
-    </div>
-    ${wikiButton}
-  `;
-
-  dom.itemOverview.innerHTML = wrapCard("搜索结果", "需要你确认准确条目", markup);
-  dom.marketOverview.innerHTML = wrapCard("详情面板", "等待选择", `<div class="notice notice--soft">请点击上方候选条目，或直接打开软件内国服 Wiki 搜索继续确认。</div>`);
-  dom.obtainPanel.innerHTML = wrapCard("获取方式", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示获取方式。</div>`);
-  dom.craftPanel.innerHTML = wrapCard("制作配方", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示制作配方。</div>`);
-  dom.usagePanel.innerHTML = wrapCard("用途", "等待选择", `<div class="notice notice--soft">选择准确物品后再显示用途。</div>`);
-  dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">请先从候选列表中选择准确物品</td></tr>`;
-}
-
-async function tryResolveAmbiguousViaWiki(keyword) {
-  const wikiResolved = await resolveItemViaWikiFallback(keyword);
-  if (!wikiResolved) {
-    return null;
-  }
-
-  if (wikiResolved.itemId) {
-    const entry = buildResolvedAliasItems(keyword, {
-      itemId: wikiResolved.itemId,
-      name: wikiResolved.title || keyword,
-      englishName: wikiResolved.englishName || wikiResolved.title || keyword,
-      icon: "",
-      fast: true,
-      description: "该结果通过国服 Wiki 二次兜底解析得到。",
-    })[0];
-
-    return {
-      type: "item",
-      id: entry.ID,
-      name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
-      subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
-      icon: entry.Icon,
-      raw: entry,
-    };
-  }
-
-  if (wikiResolved.title || wikiResolved.url) {
-    return {
-      type: "wiki",
-      id: 0,
-      name: wikiResolved.title || keyword,
-      subtitle: "国服 Wiki 命中结果，当前无法直接映射为可定价物品，可先打开 Wiki 继续确认",
-      icon: "",
-      raw: {
-        wikiUrl: wikiResolved.url || buildWikiSearchUrl(keyword),
-      },
-    };
-  }
-
-  return null;
-}
-
-function renderSearchResults(results) {
-  if (!results.length) {
-    dom.searchResults.classList.add("hidden");
-    dom.searchResults.innerHTML = "";
-    return;
-  }
-
-  dom.searchResults.innerHTML = "";
-  const fragment = document.createDocumentFragment();
-
-  for (const entry of results) {
-    const node = dom.resultTemplate.content.firstElementChild.cloneNode(true);
-    const icon = node.querySelector(".result-item__icon");
-    const name = node.querySelector(".result-item__name");
-    const meta = node.querySelector(".result-item__meta");
-    const typeLabel = entry.type === "quest" ? "任务" : entry.type === "wiki" ? "Wiki" : "物品";
-
-    icon.style.backgroundImage = `url(${toIconUrl(entry.icon)})`;
-    name.textContent = entry.name;
-    meta.textContent = `${typeLabel} · ${entry.subtitle}`;
-
-    node.addEventListener("click", async () => {
-      dom.searchResults.classList.add("hidden");
-      dom.searchInput.value = entry.name;
-      if (entry.type === "quest") {
-        await loadQuestPage(entry.id);
-      } else if (entry.type === "wiki") {
-        openWikiSearch(entry.raw?.wikiUrl || entry.name);
-      } else {
-        await loadItemPage(entry.id);
-      }
-    });
-
-    fragment.appendChild(node);
-  }
-
-  dom.searchResults.appendChild(fragment);
-  dom.searchResults.classList.remove("hidden");
-}
-
 function scoreSearchResult(entry, normalizedKeyword) {
   const names = [
     entry.name,
@@ -845,43 +664,6 @@ async function searchQuests(keyword) {
   return fallback.Results || [];
 }
 
-function renderSearchResults(results) {
-  if (!results.length) {
-    dom.searchResults.classList.add("hidden");
-    dom.searchResults.innerHTML = "";
-    return;
-  }
-
-  dom.searchResults.innerHTML = "";
-  const fragment = document.createDocumentFragment();
-
-  for (const entry of results) {
-    const node = dom.resultTemplate.content.firstElementChild.cloneNode(true);
-    const icon = node.querySelector(".result-item__icon");
-    const name = node.querySelector(".result-item__name");
-    const meta = node.querySelector(".result-item__meta");
-
-    icon.style.backgroundImage = `url(${toIconUrl(entry.icon)})`;
-    name.textContent = entry.name;
-    meta.textContent = `${entry.type === "quest" ? "任务" : "物品"} · ${entry.subtitle}`;
-
-    node.addEventListener("click", async () => {
-      dom.searchResults.classList.add("hidden");
-      dom.searchInput.value = entry.name;
-      if (entry.type === "quest") {
-        await loadQuestPage(entry.id);
-      } else {
-        await loadItemPage(entry.id);
-      }
-    });
-
-    fragment.appendChild(node);
-  }
-
-  dom.searchResults.appendChild(fragment);
-  dom.searchResults.classList.remove("hidden");
-}
-
 function debugLog(message) {
   try {
     const current = loadDebugLog();
@@ -913,44 +695,163 @@ function loadDebugLog() {
 
 function initializeTheme() {
   const saved = loadThemePreference();
-  applyTheme(saved);
+  applyTheme(saved.mode, saved.color);
 }
 
-function normalizeThemeKey(theme) {
-  return ["light", "dark", "pink", "blue", "purple", "green"].includes(theme) ? theme : "light";
+function normalizeThemeMode(theme) {
+  return ["light", "dark"].includes(theme) ? theme : "light";
 }
 
 function loadThemePreference() {
   try {
-    const saved = localStorage.getItem(THEME_PREFERENCE_KEY);
-    return normalizeThemeKey(saved);
+    const raw = localStorage.getItem(THEME_PREFERENCE_KEY);
+    if (!raw) {
+      return { mode: "light", color: DEFAULT_THEME_COLOR };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      mode: normalizeThemeMode(parsed?.mode),
+      color: normalizeThemeColor(parsed?.color),
+    };
   } catch {
-    return "light";
+    return { mode: "light", color: DEFAULT_THEME_COLOR };
   }
 }
 
-function setThemePreference(theme) {
-  const nextTheme = normalizeThemeKey(theme);
+function setThemePreference(partialTheme) {
+  const nextTheme = {
+    mode: normalizeThemeMode(partialTheme?.mode ?? state.themeMode),
+    color: normalizeThemeColor(partialTheme?.color ?? state.themeColor),
+  };
   try {
-    localStorage.setItem(THEME_PREFERENCE_KEY, nextTheme);
+    localStorage.setItem(THEME_PREFERENCE_KEY, JSON.stringify(nextTheme));
   } catch {
     // ignore storage failures
   }
-  applyTheme(nextTheme);
+  applyTheme(nextTheme.mode, nextTheme.color);
 }
 
-function applyTheme(theme) {
-  state.theme = normalizeThemeKey(theme);
-  document.documentElement.dataset.theme = state.theme;
+function applyTheme(mode, color) {
+  state.themeMode = normalizeThemeMode(mode);
+  state.themeColor = normalizeThemeColor(color);
+  document.documentElement.dataset.theme = state.themeMode;
+  applyThemeColorVariables(state.themeColor, state.themeMode === "dark");
   syncThemeSwitch();
 }
 
 function syncThemeSwitch() {
-  dom.themeSwitch?.querySelectorAll("[data-theme-option]").forEach((button) => {
-    const isActive = button.getAttribute("data-theme-option") === state.theme;
+  dom.themeSwitch?.querySelectorAll("[data-theme-mode]").forEach((button) => {
+    const isActive = button.getAttribute("data-theme-mode") === state.themeMode;
     button.classList.toggle("is-active", isActive);
     button.setAttribute("aria-pressed", isActive ? "true" : "false");
   });
+  if (dom.themeColorPicker) {
+    dom.themeColorPicker.value = state.themeColor;
+  }
+  if (dom.themeRgbInput) {
+    dom.themeRgbInput.value = formatRgbString(state.themeColor);
+  }
+}
+
+function applyThemeColorInput() {
+  const parsedColor = parseThemeColorInput(dom.themeRgbInput?.value || "");
+  if (!parsedColor) {
+    if (dom.themeRgbInput) {
+      dom.themeRgbInput.value = formatRgbString(state.themeColor);
+    }
+    return;
+  }
+  setThemePreference({ color: parsedColor });
+}
+
+function normalizeThemeColor(value) {
+  const text = String(value || "").trim();
+  return /^#[0-9a-f]{6}$/i.test(text) ? text.toLowerCase() : DEFAULT_THEME_COLOR;
+}
+
+function parseThemeColorInput(value) {
+  const text = String(value || "").trim();
+  if (!text) {
+    return null;
+  }
+  if (/^#[0-9a-f]{6}$/i.test(text)) {
+    return text.toLowerCase();
+  }
+  const rgbMatch = text.match(/^rgb\s*\(\s*(\d{1,3})\s*[,，]\s*(\d{1,3})\s*[,，]\s*(\d{1,3})\s*\)$/i)
+    || text.match(/^(\d{1,3})\s*[,，]\s*(\d{1,3})\s*[,，]\s*(\d{1,3})$/);
+  if (!rgbMatch) {
+    return null;
+  }
+  const rgb = {
+    r: clampColorChannel(Number(rgbMatch[1])),
+    g: clampColorChannel(Number(rgbMatch[2])),
+    b: clampColorChannel(Number(rgbMatch[3])),
+  };
+  return rgbToHex(rgb);
+}
+
+function applyThemeColorVariables(hexColor, isDarkMode) {
+  const rootStyle = document.documentElement.style;
+  const rgb = hexToRgb(hexColor);
+  const lighter = mixRgb(rgb, { r: 255, g: 255, b: 255 }, 0.28);
+  const lighterStrong = mixRgb(rgb, { r: 255, g: 255, b: 255 }, 0.62);
+  const darker = mixRgb(rgb, { r: 0, g: 0, b: 0 }, isDarkMode ? 0.18 : 0.24);
+  const darkerStrong = mixRgb(rgb, { r: 0, g: 0, b: 0 }, isDarkMode ? 0.34 : 0.42);
+  const heroStart = mixRgb(rgb, { r: 18, g: 14, b: 12 }, isDarkMode ? 0.62 : 0.48);
+  const heroEnd = mixRgb(rgb, { r: 255, g: 255, b: 255 }, isDarkMode ? 0.10 : 0.16);
+
+  rootStyle.setProperty("--accent", rgbToCss(rgb));
+  rootStyle.setProperty("--accent-strong", rgbToCss(isDarkMode ? lighter : darkerStrong));
+  rootStyle.setProperty("--accent-faint", rgbaToCss(rgb, isDarkMode ? 0.18 : 0.12));
+  rootStyle.setProperty("--focus-ring", rgbaToCss(rgb, isDarkMode ? 0.24 : 0.16));
+  rootStyle.setProperty("--row-hover-bg", rgbaToCss(rgb, isDarkMode ? 0.14 : 0.08));
+  rootStyle.setProperty("--bg-glow-1", rgbaToCss(lighterStrong, isDarkMode ? 0.18 : 0.76));
+  rootStyle.setProperty("--bg-glow-2", rgbaToCss(rgb, isDarkMode ? 0.08 : 0.16));
+  rootStyle.setProperty("--hero-bg-1", rgbaToCss(heroStart, isDarkMode ? 0.96 : 0.95));
+  rootStyle.setProperty("--hero-bg-2", rgbaToCss(heroEnd, isDarkMode ? 0.92 : 0.90));
+  rootStyle.setProperty("--hero-glow-1", rgbaToCss(lighter, isDarkMode ? 0.20 : 0.26));
+  rootStyle.setProperty("--hero-highlight", rgbToCss(lighterStrong));
+  rootStyle.setProperty("--card-glow", rgbaToCss(lighterStrong, isDarkMode ? 0.18 : 0.56));
+  rootStyle.setProperty("--theme-switch-active-bg", `linear-gradient(135deg, ${rgbToCss(lighter)}, ${rgbToCss(darker)})`);
+  rootStyle.setProperty("--icon-chip-bg", `linear-gradient(135deg, ${rgbToCss(lighterStrong)}, ${rgbToCss(lighter)})`);
+}
+
+function formatRgbString(hexColor) {
+  const rgb = hexToRgb(hexColor);
+  return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+}
+
+function hexToRgb(hexColor) {
+  const normalized = normalizeThemeColor(hexColor).slice(1);
+  return {
+    r: Number.parseInt(normalized.slice(0, 2), 16),
+    g: Number.parseInt(normalized.slice(2, 4), 16),
+    b: Number.parseInt(normalized.slice(4, 6), 16),
+  };
+}
+
+function rgbToHex(rgb) {
+  return `#${[rgb.r, rgb.g, rgb.b].map((value) => clampColorChannel(value).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function rgbToCss(rgb) {
+  return `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+}
+
+function rgbaToCss(rgb, alpha) {
+  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+}
+
+function mixRgb(source, target, weight) {
+  return {
+    r: clampColorChannel(Math.round(source.r + ((target.r - source.r) * weight))),
+    g: clampColorChannel(Math.round(source.g + ((target.g - source.g) * weight))),
+    b: clampColorChannel(Math.round(source.b + ((target.b - source.b) * weight))),
+  };
+}
+
+function clampColorChannel(value) {
+  return Math.min(255, Math.max(0, Number.isFinite(value) ? value : 0));
 }
 
 function renderSearchHistory() {
@@ -2300,6 +2201,7 @@ function normalizeMappingEntry(entry) {
 }
 
 async function bootstrap() {
+  initializeTheme();
   renderRegionFilters(["全部"]);
   bindEvents();
   renderSearchHistory();
