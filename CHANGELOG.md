@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.4 - 2026-05-22
+
+- Cleaned up duplicated frontend bootstrap, search rendering, and legacy override paths
+- Kept the search pipeline on the local bilingual mapping table plus Wiki fallback
+- Added theme color controls via color picker and `RGB` input
+- Added desktop opacity adjustment from `10%` to `100%`
+- Fixed the search suggestion panel overlapping the search box
+- Fixed related item navigation so mapped item detail pages keep the Chinese display name instead of reverting to English
+
 ## v1.0.2 - 2026-05-12
 
 - Added `全部 / HQ / 非 HQ` market quality filters to the item price view

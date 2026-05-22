@@ -1039,7 +1039,7 @@ async function getItem(itemId) {
 }
 
 async function fetchItemWithFallback(itemId) {
-  const aliasMeta = state.resolvedAliases.get(itemId) || null;
+  const aliasMeta = state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null;
   const columns = encodeURIComponent([
     "ID",
     "Name",
@@ -1161,11 +1161,15 @@ function applyAliasMetaToItem(item, aliasMeta, itemId) {
     return base;
   }
 
+  const aliasName = getAliasDisplayName(aliasMeta);
+  const aliasEnglishName = getAliasEnglishName(aliasMeta);
+  const aliasDescription = getAliasDescription(aliasMeta);
+
   return {
     ...base,
-    Name: aliasMeta.preferredName || base.Name || base.Name_en || `物品 #${itemId}`,
-    Name_en: base.Name_en || aliasMeta.preferredEnglishName || base.Name || "",
-    Description: aliasMeta.preferredDescription || base.Description || "",
+    Name: aliasName || base.Name || base.Name_en || `物品 #${itemId}`,
+    Name_en: base.Name_en || aliasEnglishName || base.Name || "",
+    Description: aliasDescription || base.Description || "",
     Icon: base.Icon || aliasMeta.icon || "",
     ItemUICategory: base.ItemUICategory?.Name
       ? base.ItemUICategory
@@ -2037,7 +2041,10 @@ function renderRouteLink(id, name, type) {
   if (!id || !name) {
     return "";
   }
-  return `<a class="route-link" href="?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}&name=${encodeURIComponent(name)}">${escapeHtml(name)}</a>`;
+  const routeName = type === "item"
+    ? getPreferredItemNameById(id, name)
+    : name;
+  return `<a class="route-link" href="?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}&name=${encodeURIComponent(routeName)}">${escapeHtml(routeName)}</a>`;
 }
 
 function renderExternalButton(url, label) {
@@ -2118,8 +2125,33 @@ function jsonString(value) {
 }
 
 function getPreferredItemName(item) {
-  const aliasMeta = item?.ID ? state.resolvedAliases.get(Number(item.ID)) : null;
-  return aliasMeta?.preferredName || item?.Name || item?.Name_en || "";
+  const itemId = item?.ID ? Number(item.ID) : 0;
+  const aliasMeta = itemId
+    ? (state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null)
+    : null;
+  return getAliasDisplayName(aliasMeta) || item?.Name || item?.Name_en || "";
+}
+
+function getPreferredItemNameById(itemId, fallbackName = "") {
+  const numericId = Number(itemId);
+  const aliasMeta = state.resolvedAliases.get(numericId) || state.itemMappingById?.get(numericId) || null;
+  const preferredName = getAliasDisplayName(aliasMeta);
+  if (preferredName) {
+    return preferredName;
+  }
+  return String(fallbackName || "");
+}
+
+function getAliasDisplayName(aliasMeta) {
+  return String(aliasMeta?.preferredName || aliasMeta?.name || "").trim();
+}
+
+function getAliasEnglishName(aliasMeta) {
+  return String(aliasMeta?.preferredEnglishName || aliasMeta?.englishName || "").trim();
+}
+
+function getAliasDescription(aliasMeta) {
+  return String(aliasMeta?.preferredDescription || aliasMeta?.description || "").trim();
 }
 
 async function openWikiSearch(query) {
@@ -2146,6 +2178,7 @@ async function loadItemMapping() {
     const entries = Array.isArray(payload?.entries) ? payload.entries : (Array.isArray(payload?.Entries) ? payload.Entries : []);
     state.itemMappingEntries = entries.map(normalizeMappingEntry).filter(Boolean);
     state.itemMappingExact = new Map();
+    state.itemMappingById = new Map();
 
     for (const entry of state.itemMappingEntries) {
       const { itemId, zhName, enName, zhDescription, iconPath } = entry;
@@ -2157,6 +2190,7 @@ async function loadItemMapping() {
         fast: true,
         description: String(zhDescription || "该结果通过本地客户端双语映射表解析得到。"),
       };
+      state.itemMappingById.set(alias.itemId, alias);
 
       for (const key of [alias.name, alias.englishName]) {
         const normalized = normalizeSearchKey(key);
@@ -2172,6 +2206,7 @@ async function loadItemMapping() {
   } catch (error) {
     state.itemMappingEntries = [];
     state.itemMappingExact = new Map();
+    state.itemMappingById = new Map();
     debugLog(`[mapping] load-failed error=${error?.message || error}`);
   }
 }

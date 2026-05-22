@@ -351,6 +351,8 @@ input {
   position: relative;
   z-index: 40;
   align-self: stretch;
+  display: grid;
+  gap: 14px;
   padding: 24px;
   border-radius: 24px;
   background: var(--panel-bg);
@@ -533,7 +535,7 @@ input {
 }
 
 .search-history {
-  margin-top: 14px;
+  margin-top: 0;
 }
 
 .search-history__header {
@@ -579,7 +581,7 @@ input {
   position: absolute;
   left: 24px;
   right: 24px;
-  top: 120px;
+  top: calc(100% - 8px);
   z-index: 120;
   max-height: min(78vh, 920px);
   overflow: auto;
