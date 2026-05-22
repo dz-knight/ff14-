@@ -916,17 +916,21 @@ function initializeTheme() {
   applyTheme(saved);
 }
 
+function normalizeThemeKey(theme) {
+  return ["light", "dark", "pink", "blue", "purple", "green"].includes(theme) ? theme : "light";
+}
+
 function loadThemePreference() {
   try {
     const saved = localStorage.getItem(THEME_PREFERENCE_KEY);
-    return saved === "dark" ? "dark" : "light";
+    return normalizeThemeKey(saved);
   } catch {
     return "light";
   }
 }
 
 function setThemePreference(theme) {
-  const nextTheme = theme === "dark" ? "dark" : "light";
+  const nextTheme = normalizeThemeKey(theme);
   try {
     localStorage.setItem(THEME_PREFERENCE_KEY, nextTheme);
   } catch {
@@ -936,7 +940,7 @@ function setThemePreference(theme) {
 }
 
 function applyTheme(theme) {
-  state.theme = theme === "dark" ? "dark" : "light";
+  state.theme = normalizeThemeKey(theme);
   document.documentElement.dataset.theme = state.theme;
   syncThemeSwitch();
 }

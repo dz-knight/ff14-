@@ -21,6 +21,7 @@ internal sealed class MainForm : Form
     private readonly ToolStripTextBox _addressBox;
     private readonly ToolStripButton _goButton;
     private readonly ToolStripButton _wikiSearchButton;
+    private readonly ToolStripDropDownButton _opacityButton;
     private readonly ToolStripLabel _previewTitleLabel;
     private readonly SemaphoreSlim _resolverGate = new(1, 1);
     private readonly TaskCompletionSource<bool> _resolverReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -56,6 +57,22 @@ internal sealed class MainForm : Form
         };
         _goButton = new ToolStripButton("打开");
         _wikiSearchButton = new ToolStripButton("Wiki 搜索");
+        _opacityButton = new ToolStripDropDownButton("透明度 100%");
+
+        foreach (var choice in new (string Label, double Value)[]
+        {
+            ("100%", 1.00),
+            ("95%", 0.95),
+            ("90%", 0.90),
+            ("85%", 0.85),
+            ("80%", 0.80),
+            ("75%", 0.75),
+        })
+        {
+            var item = new ToolStripMenuItem(choice.Label);
+            item.Click += (_, _) => ApplyWindowOpacity(choice.Value);
+            _opacityButton.DropDownItems.Add(item);
+        }
 
         topBar.Items.Add(marketButton);
         topBar.Items.Add(wikiButton);
@@ -63,6 +80,8 @@ internal sealed class MainForm : Form
         topBar.Items.Add(_addressBox);
         topBar.Items.Add(_goButton);
         topBar.Items.Add(_wikiSearchButton);
+        topBar.Items.Add(new ToolStripSeparator());
+        topBar.Items.Add(_opacityButton);
 
         _tabs = new TabControl
         {
@@ -139,6 +158,22 @@ internal sealed class MainForm : Form
 
         Load += HandleLoad;
         FormClosed += HandleClosed;
+
+        ApplyWindowOpacity(1.0);
+    }
+
+    private void ApplyWindowOpacity(double opacity)
+    {
+        var nextOpacity = Math.Min(1.0, Math.Max(0.75, opacity));
+        Opacity = nextOpacity;
+        _opacityButton.Text = $"透明度 {Math.Round(nextOpacity * 100):0}%";
+        foreach (ToolStripItem item in _opacityButton.DropDownItems)
+        {
+            if (item is ToolStripMenuItem menuItem)
+            {
+                menuItem.Checked = string.Equals(menuItem.Text, $"{Math.Round(nextOpacity * 100):0}%", StringComparison.Ordinal);
+            }
+        }
     }
 
     private WebView2 BuildWebView()
