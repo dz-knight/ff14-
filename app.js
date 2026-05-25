@@ -13,6 +13,8 @@ const FETCH_LIMITS = {
   craftRecipes: 40,
   gatherItems: 24,
   relatedQuests: 16,
+  shopSources: 12,
+  shopNpcsPerShop: 4,
 };
 const KNOWN_ITEM_ALIASES = {};
 
@@ -44,6 +46,11 @@ const state = {
     gatherPoint: new Map(),
     market: new Map(),
     search: new Map(),
+    shopSource: new Map(),
+    shopNpc: new Map(),
+    npcLocation: new Map(),
+    npc: new Map(),
+    map: new Map(),
   },
 };
 
@@ -301,6 +308,7 @@ async function loadMarketMetadata() {
         ...(sourceWorld || { id: worldId, name: `#${worldId}` }),
         region: dataCenter.region,
         dataCenter: dataCenter.name,
+        dataCenterName: dataCenter.name,
       });
     }
   }
@@ -975,6 +983,7 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   const craftRecipeIds = uniqueNumbers(flattenLinkValues(links.Recipe?.ItemResult));
   const usageRecipeIds = uniqueNumbers(flattenLinkObject(links.Recipe, /^ItemIngredient/));
   const gatheringItemIds = uniqueNumbers(flattenLinkValues(links.GatheringItem?.Item));
+  const gilShopIds = getGilShopIds(item);
 
   const limitedUsageRecipeIds = usageRecipeIds.slice(0, FETCH_LIMITS.usageRecipes);
   const craftIds = craftRecipeIds.slice(0, FETCH_LIMITS.craftRecipes);
@@ -982,7 +991,7 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   const aliasMeta = state.resolvedAliases.get(itemId) || null;
   const shouldSkipRelatedQuestSearch = !!aliasMeta?.fast || !Object.keys(links || {}).length;
 
-  const [marketRows, craftRecipes, usageRecipes, gatherData, relatedQuests] = await Promise.all([
+  const [marketRows, craftRecipes, usageRecipes, gatherData, relatedQuests, shopSources] = await Promise.all([
     getMarketRows(itemId),
     Promise.all(craftIds.map((id) => getRecipe(id))),
     Promise.all(limitedUsageRecipeIds.map((id) => getRecipe(id))),
@@ -990,6 +999,10 @@ async function loadItemPage(itemId, { replace = false } = {}) {
     shouldSkipRelatedQuestSearch
       ? Promise.resolve([])
       : searchQuests(item.Name || item.Name_en || "").catch(() => []),
+    getShopSources(item, gilShopIds).catch((error) => {
+      console.error("读取 NPC 商店来源失败", error);
+      return [];
+    }),
   ]);
 
   const directCraftRecipes = craftRecipes
@@ -1009,7 +1022,8 @@ async function loadItemPage(itemId, { replace = false } = {}) {
     usageRecipes.filter(Boolean),
     usageRecipeIds.length,
     directCraftRecipes.length,
-    indirectCraftRecipes
+    indirectCraftRecipes,
+    shopSources
   );
   renderCraftPanel(directCraftRecipes, craftRecipeIds.length, indirectCraftRecipes);
   renderUsagePanel(usageRecipes.filter(Boolean), usageRecipeIds.length, item.ID);
@@ -1306,6 +1320,7 @@ function buildWorldRowsFromPayload(dataCenter, payload) {
       worldId,
       worldName: world?.name || `#${worldId}`,
       region: world?.region || dataCenter.region,
+      marketRegion: dataCenter.name,
       dataCenter: dataCenter.name,
       minPrice: record?.minPrice ?? null,
       listingCount: record?.listingCount ?? 0,
@@ -1321,6 +1336,7 @@ function buildEmptyWorldRow(dataCenter, worldId) {
     worldId,
     worldName: world?.name || `#${worldId}`,
     region: world?.region || dataCenter.region,
+    marketRegion: dataCenter.name,
     dataCenter: dataCenter.name,
     minPrice: null,
     listingCount: 0,
@@ -1477,13 +1493,13 @@ function renderQuestPanels(quest, questChain) {
   `);
 }
 
-function renderObtainPanel(item, gatherData, relatedQuests, usageRecipes, usageRecipeCount, craftRecipeCount, indirectCraftRecipes) {
+function renderObtainPanel(item, gatherData, relatedQuests, usageRecipes, usageRecipeCount, craftRecipeCount, indirectCraftRecipes, shopSources = []) {
   const gatherMarkup = gatherData.length
     ? `<div class="scroll-panel"><div class="gather-list">${gatherData.map((entry) => renderGatherCard(entry, item)).join("")}</div></div>`
     : `<div class="notice notice--soft">当前没有发现采集来源，可能是商店、任务、掉落或其他系统产出。</div>`;
 
   const sourceSummary = summarizeSourceLinks(item.GameContentLinks || {});
-  const shopSources = collectShopSources(item);
+  const shopSummary = collectShopSources(item, shopSources);
   const sourceMarkup = sourceSummary.length
     ? `
       <div class="scroll-panel"><div class="source-list">
@@ -1497,12 +1513,12 @@ function renderObtainPanel(item, gatherData, relatedQuests, usageRecipes, usageR
     `
     : "";
 
-  const shopMarkup = shopSources.length
+  const shopMarkup = shopSummary.length
     ? `
       <div class="subsection">
         <h3 class="subsection__title">商店 / NPC 来源</h3>
         <div class="scroll-panel"><div class="source-list">
-          ${shopSources.map((entry) => `
+          ${shopSummary.map((entry) => `
             <button type="button" class="source-card source-card--interactive" data-wiki-search="${escapeHtml(entry.query)}">
               <h3 class="source-card__title">${escapeHtml(entry.title)}</h3>
               <div class="source-card__meta">${escapeHtml(entry.description)}</div>
@@ -1567,7 +1583,7 @@ function renderObtainPanel(item, gatherData, relatedQuests, usageRecipes, usageR
       <span class="tag">产出配方 ${craftRecipeCount}</span>
       <span class="tag">用途配方 ${usageRecipeCount}</span>
       <span class="tag">采集条目 ${gatherData.length}</span>
-      <span class="tag">商店来源 ${shopSources.length}</span>
+      <span class="tag">商店来源 ${shopSummary.length}</span>
       <span class="tag">相关任务 ${relatedQuests.length}</span>
     </div>
   `;
@@ -1818,22 +1834,43 @@ function renderQuestChainList(quests, emptyText) {
   `;
 }
 
-function collectShopSources(item) {
+function collectShopSources(item, resolvedGilShopSources = []) {
   const links = item.GameContentLinks || {};
   const entries = [];
-  const gilShopCount = flattenLinkValues(links.GilShopItem).length;
+  const gilShopIds = getGilShopIds(item);
+  const gilShopCount = gilShopIds.length;
   const specialShopCount = flattenLinkValues(links.SpecialShop).length;
   const companyCount = flattenLinkValues(links.CompanyCraftSupplyItem).length;
+  const itemName = getPreferredItemName(item) || item.Name || item.Name_en || "";
 
-  if (gilShopCount > 0) {
+  if (resolvedGilShopSources.length > 0) {
+    for (const source of resolvedGilShopSources) {
+      const location = formatShopLocation(source);
+      if (!source.npcName || !source.coordinate || !location) {
+        continue;
+      }
+      const vendorText = [source.npcName, source.npcTitle].filter(Boolean).join(" / ");
+      entries.push({
+        title: `${vendorText}`,
+        description: `NPC 商店售价 ${formatPrice(source.price)}。位置：${location}。`,
+        lines: [
+          { label: "售价", value: formatPrice(source.price) },
+          { label: "位置", value: location },
+          { label: "商店记录", value: `#${source.shopId}` },
+        ],
+        query: source.wikiQuery || `${itemName} ${source.npcName || ""} 商店`,
+      });
+    }
+  } else if (gilShopCount > 0) {
     entries.push({
       title: "普通商店来源",
-      description: `检测到 ${gilShopCount} 条普通商店关联记录。该物品可通过 NPC 商店购买，目前已在软件内归类展示。`,
+      description: `检测到 ${gilShopCount} 条普通商店关联记录。该物品可通过 NPC 商店购买，售价通常为 ${formatPrice(getNpcShopPrice(item))}。`,
       lines: [
         { label: "来源类型", value: "普通商店" },
+        { label: "NPC 售价", value: formatPrice(getNpcShopPrice(item)) },
         { label: "关联记录", value: `${gilShopCount} 条` },
       ],
-      query: `${item.Name || item.Name_en} 商店 NPC`,
+      query: `${itemName} 商店 NPC`,
     });
   }
 
@@ -1845,7 +1882,7 @@ function collectShopSources(item) {
         { label: "来源类型", value: "特殊商店 / 兑换商店" },
         { label: "关联记录", value: `${specialShopCount} 条` },
       ],
-      query: `${item.Name || item.Name_en} 特殊商店`,
+      query: `${itemName} 特殊商店`,
     });
   }
 
@@ -1857,11 +1894,291 @@ function collectShopSources(item) {
         { label: "来源类型", value: "部队工房 / 工房供应" },
         { label: "关联记录", value: `${companyCount} 条` },
       ],
-      query: `${item.Name || item.Name_en} 部队工房`,
+      query: `${itemName} 部队工房`,
     });
   }
 
   return entries;
+}
+
+function getGilShopIds(item) {
+  return uniqueNumbers(flattenRawLinkValues(item?.GameContentLinks?.GilShopItem)
+    .map((value) => Math.trunc(Number(value)))
+    .filter((value) => Number.isFinite(value) && value > 0));
+}
+
+function getNpcShopPrice(item) {
+  const price = Number(item?.PriceMid || 0);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+async function getShopSources(item, shopIds) {
+  const ids = uniqueNumbers(shopIds).slice(0, FETCH_LIMITS.shopSources);
+  if (!ids.length) {
+    return [];
+  }
+
+  const groups = await Promise.all(ids.map((shopId) => getShopSource(item, shopId)));
+  return groups.flat().filter(Boolean);
+}
+
+async function getShopSource(item, shopId) {
+  if (!shopId) {
+    return [];
+  }
+
+  const cacheKey = `${item?.ID || 0}:${shopId}`;
+  if (state.caches.shopSource.has(cacheKey)) {
+    return state.caches.shopSource.get(cacheKey);
+  }
+
+  const promise = resolveShopSource(item, shopId);
+  state.caches.shopSource.set(cacheKey, promise);
+  return promise;
+}
+
+async function resolveShopSource(item, shopId) {
+  const npcs = await findShopNpcs(shopId);
+  const price = getNpcShopPrice(item);
+  const itemName = getPreferredItemName(item) || item?.Name || item?.Name_en || "";
+
+  if (!npcs.length) {
+    debugLog(`[shopSource:unresolved] shopId=${shopId} item=${itemName}`);
+    return [];
+  }
+
+  const details = await Promise.all(
+    npcs.slice(0, FETCH_LIMITS.shopNpcsPerShop).map((npc) => getNpcShopDetail(npc.id || npc.rowId, shopId, itemName, price))
+  );
+  const validDetails = details.filter((detail) => detail?.coordinate);
+  if (!validDetails.length) {
+    debugLog(`[shopSource:no-coordinate] shopId=${shopId} item=${itemName}`);
+  }
+  return validDetails;
+}
+
+async function findShopNpcs(shopId) {
+  if (state.caches.shopNpc.has(shopId)) {
+    return state.caches.shopNpc.get(shopId);
+  }
+
+  const query = encodeURIComponent(`+ENpcData[]=${shopId}`);
+  const fields = encodeURIComponent("ENpcData");
+  const url = `https://v2.xivapi.com/api/search?sheets=ENpcBase&fields=${fields}&limit=${FETCH_LIMITS.shopNpcsPerShop}&query=${query}`;
+  const promise = fetchJson(url)
+    .then((payload) => (payload.results || []).map((entry) => ({
+      id: Number(entry.row_id || 0),
+      rowId: Number(entry.row_id || 0),
+    })).filter((entry) => entry.id > 0))
+    .catch((error) => {
+      debugLog(`[shopNpc:failed] shopId=${shopId} error=${error?.message || error}`);
+      return [];
+    });
+
+  state.caches.shopNpc.set(shopId, promise);
+  return promise;
+}
+
+async function getNpcShopDetail(npcId, shopId, itemName, price) {
+  if (!npcId) {
+    return null;
+  }
+
+  const npc = await getNpcResident(npcId);
+  if (!npc?.name && !npc?.nameEn) {
+    return null;
+  }
+  const [map, location] = await Promise.all([
+    npc?.mapId ? getMapInfo(npc.mapId) : null,
+    getNpcLocation(npcId, npc).catch((error) => {
+      debugLog(`[npcLocation:failed] npcId=${npcId} error=${error?.message || error}`);
+      return null;
+    }),
+  ]);
+  const locationMap = location?.mapId && location.mapId !== map?.id
+    ? await getMapInfo(location.mapId)
+    : null;
+  const displayMap = locationMap || map;
+  return {
+    shopId,
+    npcId,
+    npcName: npc?.name || npc?.nameEn || `NPC #${npcId}`,
+    npcTitle: npc?.title || "",
+    price,
+    mapName: displayMap?.name || map?.name || "",
+    regionName: displayMap?.region || map?.region || "",
+    placeName: displayMap?.place || map?.place || "",
+    coordinate: location?.coordinate || "",
+    wikiQuery: `${itemName} ${npc?.name || npc?.nameEn || ""}`,
+  };
+}
+
+async function getNpcResident(npcId) {
+  if (state.caches.npc.has(npcId)) {
+    return state.caches.npc.get(npcId);
+  }
+
+  const columns = encodeURIComponent("ID,Name,Name_en,Title,Title_en,Map");
+  const url = `${ENCYCLOPEDIA_API}/ENpcResident/${npcId}?language=chs&columns=${columns}`;
+  const promise = fetchJson(url)
+    .then((payload) => ({
+      id: Number(payload.ID || npcId),
+      name: payload.Name || payload.Name_chs || "",
+      nameEn: payload.Name_en || "",
+      title: payload.Title || payload.Title_chs || "",
+      titleEn: payload.Title_en || "",
+      mapId: Number(payload.Map || 0) || null,
+    }))
+    .catch((error) => {
+      debugLog(`[npc:failed] npcId=${npcId} error=${error?.message || error}`);
+      return null;
+    });
+
+  state.caches.npc.set(npcId, promise);
+  return promise;
+}
+
+async function getMapInfo(mapId) {
+  if (state.caches.map.has(mapId)) {
+    return state.caches.map.get(mapId);
+  }
+
+  const columns = encodeURIComponent("ID,PlaceName.Name,PlaceNameRegion.Name,PlaceNameSub.Name,SizeFactor,OffsetX,OffsetY");
+  const url = `${ENCYCLOPEDIA_API}/map/${mapId}?language=chs&columns=${columns}`;
+  const promise = fetchJson(url)
+    .then((payload) => ({
+      id: Number(payload.ID || mapId),
+      name: payload.PlaceName?.Name || "",
+      region: payload.PlaceNameRegion?.Name || "",
+      place: payload.PlaceNameSub?.Name || "",
+      sizeFactor: Number(payload.SizeFactor || 100),
+      offsetX: Number(payload.OffsetX || 0),
+      offsetY: Number(payload.OffsetY || 0),
+    }))
+    .catch((error) => {
+      debugLog(`[map:failed] mapId=${mapId} error=${error?.message || error}`);
+      return null;
+    });
+
+  state.caches.map.set(mapId, promise);
+  return promise;
+}
+
+function formatShopLocation(source) {
+  const location = [source.regionName, source.mapName, source.placeName]
+    .filter(Boolean)
+    .filter((value, index, list) => list.indexOf(value) === index)
+    .join(" / ");
+  return [location, source.coordinate].filter(Boolean).join(" / ");
+}
+
+async function getNpcLocation(npcId, npc = null) {
+  if (state.caches.npcLocation.has(npcId)) {
+    return state.caches.npcLocation.get(npcId);
+  }
+
+  const promise = resolveNpcLocation(npcId, npc);
+  state.caches.npcLocation.set(npcId, promise);
+  return promise;
+}
+
+async function resolveNpcLocation(npcId, npc = null) {
+  const levelLocation = await getNpcLevelLocation(npcId, npc?.mapId);
+  if (levelLocation) {
+    return levelLocation;
+  }
+
+  if (!npc?.nameEn) {
+    return null;
+  }
+
+  return getNpcGarlandLocation(npcId, npc);
+}
+
+async function getNpcLevelLocation(npcId, preferredMapId = null) {
+  const query = encodeURIComponent(`+Object=${npcId}`);
+  const fields = encodeURIComponent("Map.SizeFactor,Map.OffsetX,Map.OffsetY,X,Z,Type");
+  const url = `https://v2.xivapi.com/api/search?sheets=Level&fields=${fields}&limit=12&query=${query}`;
+  const payload = await fetchJson(url).catch((error) => {
+    debugLog(`[npcLevel:failed] npcId=${npcId} error=${error?.message || error}`);
+    return null;
+  });
+  const entries = (payload?.results || [])
+    .map((entry) => mapLevelLocation(entry))
+    .filter(Boolean);
+
+  if (!entries.length) {
+    return null;
+  }
+
+  const exactMap = preferredMapId
+    ? entries.find((entry) => entry.mapId === preferredMapId)
+    : null;
+  return exactMap || entries[0];
+}
+
+function mapLevelLocation(entry) {
+  const fields = entry?.fields || {};
+  const rawX = Number(fields.X);
+  const rawY = Number(fields.Z);
+  const mapId = Number(fields.Map?.value || fields.Map?.row_id || fields.Map || 0) || null;
+  const mapFields = fields.Map?.fields || {};
+  const scale = Number(mapFields.SizeFactor || 100);
+  const offsetX = Number(mapFields.OffsetX || 0);
+  const offsetY = Number(mapFields.OffsetY || 0);
+
+  if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
+    return null;
+  }
+
+  const x = toMapCoordinate(rawX, scale, offsetX);
+  const y = toMapCoordinate(rawY, scale, offsetY);
+  return {
+    mapId,
+    rawX,
+    rawY,
+    coordinate: formatNpcCoordinate(x, y),
+  };
+}
+
+async function getNpcGarlandLocation(npcId, npc) {
+  const url = `https://www.garlandtools.org/api/search.php?text=${encodeURIComponent(npc.nameEn)}`;
+  const payload = await fetchJson(url).catch((error) => {
+    debugLog(`[npcGarland:failed] npcId=${npcId} error=${error?.message || error}`);
+    return null;
+  });
+  const match = pickGarlandNpcSearchResult(payload, npcId, npc);
+  const coords = match?.obj?.c;
+  if (!Array.isArray(coords) || coords.length < 2) {
+    return null;
+  }
+
+  const x = Number(coords[0]);
+  const y = Number(coords[1]);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  return {
+    mapId: Number(match.obj.m || match.obj.map || 0) || null,
+    coordinate: formatNpcCoordinate(x, y),
+  };
+}
+
+function pickGarlandNpcSearchResult(payload, npcId, npc) {
+  const candidates = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.value)
+    ? payload.value
+    : (payload?.type === "npc" ? [payload] : []);
+  const normalizedName = normalizeSearchKey(npc?.nameEn || npc?.name || "");
+  return candidates.find((entry) => Number(entry?.id || entry?.obj?.i || 0) === Number(npcId))
+    || candidates.find((entry) => entry?.type === "npc" && normalizeSearchKey(entry?.obj?.n || "") === normalizedName)
+    || candidates.find((entry) => entry?.type === "npc" && Array.isArray(entry?.obj?.c));
+}
+
+function formatNpcCoordinate(x, y) {
+  return `X:${Number(x).toFixed(1)} Y:${Number(y).toFixed(1)}`;
 }
 
 function parseQuestSearchIntent(keyword) {
@@ -1934,6 +2251,9 @@ function renderRegionFilters(regionNames) {
     button.addEventListener("click", () => {
       state.selectedRegion = region;
       renderRegionFilters(regionNames);
+      if (state.currentEntity?.type === "item") {
+        renderMarketOverview(state.currentEntity.data, state.currentWorldRows);
+      }
       renderPriceTable();
     });
     fragment.appendChild(button);
@@ -2009,6 +2329,19 @@ function flattenLinkValues(value) {
   }
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? [numeric] : [];
+}
+
+function flattenRawLinkValues(value) {
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(flattenRawLinkValues);
+  }
+  if (typeof value === "object") {
+    return Object.values(value).flatMap(flattenRawLinkValues);
+  }
+  return [value];
 }
 
 function flattenLinkObject(object, keyPattern) {
@@ -2245,7 +2578,7 @@ async function bootstrap() {
     setBootStatus("正在载入双语映射与区服数据");
     await loadItemMapping();
     await loadMarketMetadata();
-    renderRegionFilters(["全部", ...new Set(state.dataCenters.map((entry) => entry.region))]);
+    renderRegionFilters(getMarketRegionOptions());
     const cnWorldCount = state.dataCenters.reduce((sum, entry) => sum + entry.worlds.length, 0);
     setBootStatus(`已载入国服 ${cnWorldCount} 个世界服，双语映射 ${state.itemMappingEntries?.length || 0} 条`);
     await loadFromUrl({ replace: true });
@@ -2647,6 +2980,7 @@ function buildWorldRowsFromPayload(dataCenter, payload) {
       worldId,
       worldName: world?.name || `#${worldId}`,
       region: world?.region || dataCenter.region,
+      marketRegion: dataCenter.name,
       dataCenter: dataCenter.name,
       minPrice: qualityStats.all.minPrice,
       listingCount: qualityStats.all.listingCount,
@@ -2663,6 +2997,7 @@ function buildEmptyWorldRow(dataCenter, worldId) {
     worldId,
     worldName: world?.name || `#${worldId}`,
     region: world?.region || dataCenter.region,
+    marketRegion: dataCenter.name,
     dataCenter: dataCenter.name,
     minPrice: null,
     listingCount: 0,
@@ -2672,13 +3007,33 @@ function buildEmptyWorldRow(dataCenter, worldId) {
   };
 }
 
+function getRowMarketRegion(row) {
+  return row?.marketRegion || row?.dataCenter || row?.region || "未知大区";
+}
+
+function getMarketRegionOptions() {
+  return ["全部", ...new Set(state.dataCenters.map((entry) => entry.name).filter(Boolean))];
+}
+
+function getSelectedRegionLabel() {
+  return state.selectedRegion === "全部" ? "全大区" : state.selectedRegion;
+}
+
+function filterRowsBySelectedRegion(rows) {
+  if (state.selectedRegion === "全部") {
+    return rows;
+  }
+  return rows.filter((row) => getRowMarketRegion(row) === state.selectedRegion);
+}
+
 function summarizeRegions(worldRows) {
   const buckets = new Map();
   for (const row of worldRows) {
-    if (!buckets.has(row.region)) {
-      buckets.set(row.region, []);
+    const region = getRowMarketRegion(row);
+    if (!buckets.has(region)) {
+      buckets.set(region, []);
     }
-    buckets.get(row.region).push(row);
+    buckets.get(region).push(row);
   }
 
   return Array.from(buckets.entries()).map(([region, rows]) => {
@@ -2697,7 +3052,8 @@ function renderMarketOverview(item, worldRows) {
     setActiveMarketQuality("all");
   }
 
-  const rowsWithPrice = worldRows
+  const scopedRows = filterRowsBySelectedRegion(worldRows);
+  const rowsWithPrice = scopedRows
     .filter((row) => getSelectedQualityStat(row).minPrice != null)
     .sort((left, right) => {
       const leftStat = getSelectedQualityStat(left);
@@ -2708,13 +3064,14 @@ function renderMarketOverview(item, worldRows) {
       return left.worldName.localeCompare(right.worldName, "zh-CN");
     });
   const cheapest = rowsWithPrice[0];
-  const regionsCovered = new Set(worldRows.map((row) => row.region)).size;
+  const regionsCovered = new Set(scopedRows.map((row) => getRowMarketRegion(row))).size;
   const listedWorlds = rowsWithPrice.length;
   const totalListings = rowsWithPrice.reduce((sum, row) => sum + getSelectedQualityStat(row).listingCount, 0);
   const totalUnits = rowsWithPrice.reduce((sum, row) => sum + getSelectedQualityStat(row).unitsForSale, 0);
   const regionSummary = summarizeRegions(worldRows);
   const qualityOptions = getQualityOptions(item);
   const modeLabel = getMarketModeLabel();
+  const regionLabel = getSelectedRegionLabel();
 
   const markup = `
     <div class="market-quality-row">
@@ -2724,14 +3081,14 @@ function renderMarketOverview(item, worldRows) {
     </div>
     <div class="market-overview-grid">
       <div class="metric-card">
-        <div class="metric-card__label">${escapeHtml(modeLabel)} 全服最低价</div>
+        <div class="metric-card__label">${escapeHtml(modeLabel)} ${escapeHtml(regionLabel)}最低价</div>
         <div class="metric-card__value">${cheapest ? formatPrice(getSelectedQualityStat(cheapest).minPrice) : "暂无上架"}</div>
-        <div class="metric-card__detail">${cheapest ? `${escapeHtml(cheapest.region)} / ${escapeHtml(cheapest.dataCenter)} / ${escapeHtml(cheapest.worldName)}` : `当前没有读取到该物品 ${escapeHtml(modeLabel)} 品质的市场板上架。`}</div>
+        <div class="metric-card__detail">${cheapest ? `${escapeHtml(getRowMarketRegion(cheapest))} / ${escapeHtml(cheapest.worldName)}` : `当前大区没有读取到该物品 ${escapeHtml(modeLabel)} 品质的市场板上架。`}</div>
       </div>
       <div class="metric-card">
         <div class="metric-card__label">已覆盖世界服</div>
-        <div class="metric-card__value">${listedWorlds} / ${worldRows.length}</div>
-        <div class="metric-card__detail">发现价格的国服世界服 ${listedWorlds} 个，覆盖 ${regionsCovered} 个国服大区。</div>
+        <div class="metric-card__value">${listedWorlds} / ${scopedRows.length}</div>
+        <div class="metric-card__detail">当前筛选发现价格的世界服 ${listedWorlds} 个，覆盖 ${regionsCovered} 个国服大区。</div>
       </div>
       <div class="metric-card">
         <div class="metric-card__label">${escapeHtml(modeLabel)} 总上架数</div>
@@ -2754,7 +3111,7 @@ function renderMarketOverview(item, worldRows) {
     </div>
   `;
 
-  dom.marketOverview.innerHTML = wrapCard("市场总览", `${getPreferredItemName(item) || item.Name_en} ${modeLabel} 全区服价格`, markup);
+  dom.marketOverview.innerHTML = wrapCard("市场总览", `${getPreferredItemName(item) || item.Name_en} ${modeLabel} ${regionLabel}价格`, markup);
 }
 
 function renderPriceTable() {
@@ -2766,8 +3123,8 @@ function renderPriceTable() {
   const keyword = dom.worldFilter.value.trim().toLowerCase();
   const rows = state.currentWorldRows
     .filter((row) => {
-      const matchesRegion = state.selectedRegion === "全部" || row.region === state.selectedRegion;
-      const haystack = `${row.region} ${row.dataCenter} ${row.worldName}`.toLowerCase();
+      const matchesRegion = state.selectedRegion === "全部" || getRowMarketRegion(row) === state.selectedRegion;
+      const haystack = `${row.region} ${getRowMarketRegion(row)} ${row.worldName}`.toLowerCase();
       return matchesRegion && (!keyword || haystack.includes(keyword));
     })
     .sort((left, right) => {
@@ -2793,8 +3150,8 @@ function renderPriceTable() {
     const stat = getSelectedQualityStat(row);
     return `
       <tr>
+        <td>${escapeHtml(getRowMarketRegion(row))}</td>
         <td>${escapeHtml(row.region)}</td>
-        <td>${escapeHtml(row.dataCenter)}</td>
         <td>${escapeHtml(row.worldName)}</td>
         <td><span class="price-value ${stat.minPrice == null ? "is-missing" : ""}">${stat.minPrice == null ? "暂无上架" : formatPrice(stat.minPrice)}</span></td>
         <td>${formatNumber(stat.listingCount)}</td>

@@ -963,6 +963,10 @@ input {
   box-shadow: 0 14px 28px rgba(80, 50, 24, 0.08);
 }
 
+.source-card .ingredient-list {
+  margin-top: 12px;
+}
+
 .recipe-card__header,
 .gather-card__header {
   display: flex;
