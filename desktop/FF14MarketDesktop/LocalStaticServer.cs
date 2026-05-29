@@ -7,6 +7,14 @@ namespace FF14MarketDesktop;
 
 internal sealed class LocalStaticServer : IDisposable
 {
+    private static readonly HttpClient IconHttpClient = new();
+    private static readonly Regex IconPathRegex = new(@"^\d{6}/\d{6}\.png$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly string[] IconSources =
+    [
+        "https://cafemaker.wakingsands.com/i/",
+        "https://xivapi.com/i/"
+    ];
+
     private readonly HttpListener _listener = new();
     private readonly string _rootPath;
     private readonly Func<string, Task<string>>? _itemResolver;
@@ -83,6 +91,11 @@ internal sealed class LocalStaticServer : IDisposable
                 await HandleResolveItemAsync(context);
                 return;
             }
+            if (absolutePath.Equals("/__icon", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleIconAsync(context);
+                return;
+            }
             if (absolutePath.Equals("/__debug_log", StringComparison.OrdinalIgnoreCase))
             {
                 LogToFile($"[server] hit __debug_log method={context.Request.HttpMethod}");
@@ -142,6 +155,94 @@ internal sealed class LocalStaticServer : IDisposable
                 response.Close();
             }
         }
+    }
+
+    private async Task HandleIconAsync(HttpListenerContext context)
+    {
+        var response = context.Response;
+        response.ContentType = "image/png";
+        response.Headers["Cache-Control"] = "public, max-age=604800";
+
+        var iconPath = NormalizeIconPath(GetQueryParameter(context.Request.Url?.Query ?? string.Empty, "path"));
+        if (string.IsNullOrWhiteSpace(iconPath))
+        {
+            response.StatusCode = (int)HttpStatusCode.BadRequest;
+            await WriteTextAsync(response, "Invalid icon path");
+            response.Close();
+            return;
+        }
+
+        var bytes = await ReadCachedIconAsync(iconPath) ?? await FetchAndCacheIconAsync(iconPath);
+        if (bytes is null || bytes.Length == 0)
+        {
+            response.StatusCode = (int)HttpStatusCode.NotFound;
+            response.Headers["Cache-Control"] = "no-store";
+            await WriteTextAsync(response, "Icon not found");
+            response.Close();
+            return;
+        }
+
+        response.ContentLength64 = bytes.LongLength;
+        await response.OutputStream.WriteAsync(bytes, 0, bytes.Length);
+        response.Close();
+    }
+
+    private static async Task<byte[]?> ReadCachedIconAsync(string iconPath)
+    {
+        try
+        {
+            var cachePath = GetIconCachePath(iconPath);
+            return File.Exists(cachePath) ? await File.ReadAllBytesAsync(cachePath) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<byte[]?> FetchAndCacheIconAsync(string iconPath)
+    {
+        foreach (var source in IconSources)
+        {
+            try
+            {
+                using var response = await IconHttpClient.GetAsync(source + iconPath);
+                var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
+                if (!response.IsSuccessStatusCode || !mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var bytes = await response.Content.ReadAsByteArrayAsync();
+                if (bytes.Length == 0)
+                {
+                    continue;
+                }
+
+                var cachePath = GetIconCachePath(iconPath);
+                Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+                await File.WriteAllBytesAsync(cachePath, bytes);
+                return bytes;
+            }
+            catch
+            {
+                // Try the next icon source.
+            }
+        }
+
+        return null;
+    }
+
+    private static string GetIconCachePath(string iconPath)
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FF14MarketDesktop", "icon-cache");
+        var fullPath = Path.GetFullPath(Path.Combine(root, iconPath.Replace('/', Path.DirectorySeparatorChar)));
+        if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Invalid icon cache path.");
+        }
+
+        return fullPath;
     }
 
     private async Task HandleResolveItemAsync(HttpListenerContext context)
@@ -220,6 +321,29 @@ internal sealed class LocalStaticServer : IDisposable
 
     private static string EscapeJson(string value) =>
         value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+    private static string NormalizeIconPath(string value)
+    {
+        var normalized = (value ?? string.Empty)
+            .Trim()
+            .Replace('\\', '/')
+            .TrimStart('/');
+
+        if (normalized.StartsWith("i/", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[2..];
+        }
+        if (normalized.StartsWith("ui/icon/", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[8..];
+        }
+        if (normalized.EndsWith(".tex", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[..^4] + ".png";
+        }
+
+        return IconPathRegex.IsMatch(normalized) ? normalized : string.Empty;
+    }
 
     private sealed record ResolveRequest(string? Query);
     private sealed record DebugRequest(string? Message);

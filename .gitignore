@@ -15,6 +15,7 @@ Thumbs.db
 
 # Local runtime / temp data
 WebView2Runtime/
+.icon-cache/
 
 # Archives
 *.zip

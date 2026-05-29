@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.6 - 2026-05-29
+
+- Added current-scope sales rankings for CN region, data center, and world scopes with top-30 price and quantity views
+- Added click-triggered recipe cost and profit calculation with material prices, total cost, current lowest sale price, tax, net profit, and profit rate
+- Optimized ranking loading with batched concurrent Universalis aggregated requests and short preview caching while still refreshing on click
+- Fixed web ranking item names and icons by hydrating local mapping data and adding a local icon proxy/cache fallback
+
 ## v1.0.5 - 2026-05-25
 
 - Added CN data-center filters for market prices: `陆行鸟`, `莫古力`, `猫小胖`, and `豆豆柴`

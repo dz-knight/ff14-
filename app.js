@@ -7,7 +7,17 @@ const SEARCH_HISTORY_KEY = "ff14_market_search_history_v1";
 const SEARCH_HISTORY_LIMIT = 12;
 const DEBUG_LOG_KEY = "ff14_market_debug_log_v1";
 const THEME_PREFERENCE_KEY = "ff14_market_theme_v1";
+const SALES_RANKING_STORAGE_KEY = "ff14_market_sales_ranking_cache_v2";
 const DEFAULT_THEME_COLOR = "#bb6b1f";
+const SALES_RANKING_LIMIT = 30;
+const SALES_RANKING_BATCH_SIZE = 900;
+const SALES_RANKING_CONCURRENCY = 6;
+const SALES_RANKING_BATCH_TIMEOUT_MS = 20000;
+const SALES_RANKING_TAX_RATE = 0.05;
+const SALES_RANKING_CACHE_TTL_MS = 2 * 60 * 1000;
+const SALES_RANKING_STORAGE_TTL_MS = 5 * 60 * 1000;
+const ICON_PROXY_ENDPOINT = "/__icon";
+const LOCAL_ICON_PROXY_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const FETCH_LIMITS = {
   usageRecipes: 120,
   craftRecipes: 40,
@@ -35,6 +45,11 @@ const state = {
   resolvedAliases: new Map(),
   resolvedQueries: new Map(),
   selectedMarketQuality: "all",
+  salesRankingMode: "price",
+  salesRankingScope: "region:中国",
+  salesRankingToken: 0,
+  currentSalesRanking: null,
+  currentCraftRecipes: new Map(),
   themeMode: "light",
   themeColor: DEFAULT_THEME_COLOR,
   caches: {
@@ -51,6 +66,8 @@ const state = {
     npcLocation: new Map(),
     npc: new Map(),
     map: new Map(),
+    marketableItems: null,
+    salesRanking: new Map(),
   },
 };
 
@@ -68,6 +85,13 @@ const dom = {
   priceTableBody: document.getElementById("price-table-body"),
   itemOverview: document.getElementById("item-overview"),
   marketOverview: document.getElementById("market-overview"),
+  salesRankingPanel: document.getElementById("sales-ranking-panel"),
+  salesRankingScope: document.getElementById("sales-ranking-scope"),
+  salesRankingButton: document.getElementById("load-sales-ranking"),
+  salesRankingStatus: document.getElementById("sales-ranking-status"),
+  salesRankingSummary: document.getElementById("sales-ranking-summary"),
+  salesRankingTabs: document.getElementById("sales-ranking-tabs"),
+  salesRankingTableBody: document.getElementById("sales-ranking-table-body"),
   obtainPanel: document.getElementById("obtain-panel"),
   craftPanel: document.getElementById("craft-panel"),
   usagePanel: document.getElementById("usage-panel"),
@@ -217,6 +241,18 @@ function bindEvents() {
   });
   dom.searchInput.addEventListener("input", () => handleSearchInput(dom.searchInput.value.trim()));
   dom.worldFilter.addEventListener("input", renderPriceTable);
+  dom.salesRankingScope?.addEventListener("change", () => {
+    state.salesRankingScope = dom.salesRankingScope.value || state.salesRankingScope;
+    renderSalesRankingIdle();
+  });
+  dom.salesRankingButton?.addEventListener("click", () => loadSalesRanking());
+  dom.salesRankingTabs?.querySelectorAll("[data-sales-ranking-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.salesRankingMode = button.getAttribute("data-sales-ranking-mode") || "price";
+      renderSalesRankingTabs();
+      renderSalesRankingTable();
+    });
+  });
   document.addEventListener("click", (event) => {
     const wikiTarget = event.target instanceof Element ? event.target.closest("[data-wiki-search]") : null;
     if (wikiTarget) {
@@ -227,6 +263,20 @@ function bindEvents() {
 
     if (!dom.searchResults.contains(event.target) && event.target !== dom.searchInput) {
       dom.searchResults.classList.add("hidden");
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    const profitTarget = event.target instanceof Element ? event.target.closest("[data-profit-recipe-id]") : null;
+    if (!profitTarget) {
+      return;
+    }
+
+    event.preventDefault();
+    const recipeId = Number(profitTarget.getAttribute("data-profit-recipe-id") || 0);
+    const recipe = state.currentCraftRecipes.get(recipeId);
+    if (recipe) {
+      loadRecipeProfit(recipe, getSelectedRecipeProfitScope(recipeId));
     }
   });
 }
@@ -312,6 +362,45 @@ async function loadMarketMetadata() {
       });
     }
   }
+
+  syncSalesRankingScopeOptions();
+}
+
+function syncSalesRankingScopeOptions() {
+  if (!dom.salesRankingScope) {
+    return;
+  }
+
+  const options = getMarketScopeOptions();
+
+  dom.salesRankingScope.innerHTML = options.map((entry) => `
+    <option value="${escapeHtml(entry.value)}">${escapeHtml(entry.label)}</option>
+  `).join("");
+
+  if (!options.some((entry) => entry.value === state.salesRankingScope)) {
+    state.salesRankingScope = options[0].value;
+  }
+  dom.salesRankingScope.value = state.salesRankingScope;
+  renderSalesRankingIdle();
+}
+
+function getMarketScopeOptions() {
+  const options = [{ value: "region:中国", label: "中国全区", type: "region" }];
+  for (const dataCenter of state.dataCenters) {
+    options.push({ value: `dc:${dataCenter.name}`, label: dataCenter.name, type: "dc" });
+    for (const worldId of dataCenter.worlds || []) {
+      const world = state.worldMap.get(worldId);
+      if (world?.name) {
+        options.push({
+          value: `world:${world.name}`,
+          label: `${dataCenter.name} / ${world.name}`,
+          type: "world",
+          worldId,
+        });
+      }
+    }
+  }
+  return options;
 }
 
 function handleSearchInput(keyword) {
@@ -974,6 +1063,7 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   updateRoute("item", item.ID, item.Name, replace);
   state.currentEntity = { type: "item", data: item };
   state.currentWorldRows = [];
+  state.currentCraftRecipes = new Map();
   dom.searchInput.value = getPreferredItemName(item);
   renderItemOverview(item);
   renderMarketOverview(item, []);
@@ -1592,6 +1682,7 @@ function renderObtainPanel(item, gatherData, relatedQuests, usageRecipes, usageR
 }
 
 function renderCraftPanel(recipes, totalCount, indirectCraftRecipes) {
+  state.currentCraftRecipes = new Map();
   if (!recipes.length) {
     const hint = indirectCraftRecipes.length
       ? "已发现相关成品/武具箱配方，但它们的直接产物不是当前物品本体，因此未作为直接制作显示。"
@@ -1604,6 +1695,9 @@ function renderCraftPanel(recipes, totalCount, indirectCraftRecipes) {
     ? `<div class="notice notice--soft">共发现 ${totalCount} 条产出配方，当前展示前 ${recipes.length} 条。</div>`
     : "";
 
+  for (const recipe of recipes) {
+    state.currentCraftRecipes.set(Number(recipe.ID), recipe);
+  }
   dom.craftPanel.innerHTML = wrapCard("制作配方", "如何制作", `${header}<div class="recipe-list">${recipes.map((recipe) => renderRecipeCard(recipe)).join("")}</div>`);
 }
 
@@ -1668,6 +1762,9 @@ function renderRecipeCard(recipe) {
   const craftName = recipe.CraftType?.Name || "制作";
   const level = recipe.RecipeLevelTable?.ClassJobLevel || "-";
   const resultLink = renderRouteLink(recipe.ItemResultTargetID, resultName, "item");
+  const recipeId = Number(recipe.ID || 0);
+  const scopeOptions = getRecipeProfitScopeOptions();
+  const defaultScopeValue = getDefaultRecipeProfitScopeValue();
 
   return `
     <div class="recipe-card">
@@ -1679,6 +1776,15 @@ function renderRecipeCard(recipe) {
             <div class="recipe-card__meta">${escapeHtml(craftName)} · 生产等级 ${level} · 产出 ${recipe.AmountResult || 1}</div>
           </div>
         </div>
+        <div class="recipe-profit-actions">
+          <label class="profit-scope-field">
+            <span>区服</span>
+            <select data-profit-scope-recipe-id="${recipeId}" aria-label="${escapeHtml(resultName)} 利润计算区服">
+              ${scopeOptions.map((entry) => `<option value="${escapeHtml(entry.value)}"${entry.value === defaultScopeValue ? " selected" : ""}>${escapeHtml(entry.label)}</option>`).join("")}
+            </select>
+          </label>
+          <button type="button" class="link-button recipe-profit-button" data-profit-recipe-id="${recipeId}">计算利润</button>
+        </div>
       </div>
       <div class="ingredient-list">
         ${ingredients.map((ingredient) => `
@@ -1687,6 +1793,9 @@ function renderRecipeCard(recipe) {
             <span class="ingredient__amount">x${ingredient.amount}</span>
           </div>
         `).join("")}
+      </div>
+      <div class="recipe-profit-panel" id="recipe-profit-${recipeId}">
+        <div class="notice notice--soft">点击“计算利润”后再读取材料价格并计算成本。</div>
       </div>
     </div>
   `;
@@ -1710,6 +1819,908 @@ function renderUsageCard(recipe, currentItemId) {
           <div class="usage-result__footer">当前物品消耗数量：x${usedAmount || "-"}</div>
         </div>
       </div>
+    </div>
+  `;
+}
+
+function getCalculationApi() {
+  if (window.FF14MarketCalculations) {
+    return window.FF14MarketCalculations;
+  }
+  if (!window.__FF14InlineMarketCalculations) {
+    window.__FF14InlineMarketCalculations = createInlineMarketCalculations();
+  }
+  return window.__FF14InlineMarketCalculations;
+}
+
+function createInlineMarketCalculations() {
+  const qualityKeys = ["nq", "hq"];
+  const metricValue = (row, metric) => {
+    if (metric === "quantity") return row.saleQuantity;
+    if (metric === "price") return row.currentPrice;
+    return row.salesAmount;
+  };
+  const hasMetric = (row, metric) => {
+    const value = Number(metricValue(row, metric));
+    return Number.isFinite(value) && value > 0;
+  };
+  const sortRowsByMetric = (rows, metric) => [...rows].sort((left, right) => {
+    const leftMissing = hasMetric(left, metric) ? 0 : 1;
+    const rightMissing = hasMetric(right, metric) ? 0 : 1;
+    if (leftMissing !== rightMissing) return leftMissing - rightMissing;
+    const diff = Number(metricValue(right, metric) || 0) - Number(metricValue(left, metric) || 0);
+    if (diff !== 0) return diff;
+    const quantityDiff = Number(right.saleQuantity || 0) - Number(left.saleQuantity || 0);
+    if (quantityDiff !== 0) return quantityDiff;
+    const priceDiff = Number(right.currentPrice || 0) - Number(left.currentPrice || 0);
+    if (priceDiff !== 0) return priceDiff;
+    return String(left.itemName).localeCompare(String(right.itemName), "zh-CN");
+  });
+  const numberOrNull = (value) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  };
+  const positiveOrNull = (value) => {
+    const numeric = numberOrNull(value);
+    return numeric != null && numeric > 0 ? numeric : null;
+  };
+  const pickScopeMetric = (bucket, scopeLevel) => {
+    const metric = bucket?.[scopeLevel];
+    return metric && typeof metric === "object" ? metric : null;
+  };
+  const maxTimestamp = (values) => {
+    const timestamps = values.map(numberOrNull).filter((value) => value != null && value > 0);
+    return timestamps.length ? Math.max(...timestamps) : null;
+  };
+  const resolveItemMeta = (itemLookup, itemId) => {
+    if (!itemLookup) return null;
+    if (typeof itemLookup === "function") return itemLookup(itemId) || null;
+    if (itemLookup instanceof Map) return itemLookup.get(itemId) || null;
+    return itemLookup[itemId] || itemLookup[String(itemId)] || null;
+  };
+  const getMetaName = (meta, itemId) => String(meta?.preferredName || meta?.name || meta?.zhName || meta?.ZhName || meta?.enName || meta?.EnName || `Item #${itemId}`);
+  const getMetaIcon = (meta) => String(meta?.icon || meta?.iconUrl || meta?.IconUrl || meta?.iconPath || meta?.IconPath || "");
+  const readQualitySummary = (result, qualityKey, scopeLevel) => {
+    const quality = result?.[qualityKey] || {};
+    const minListing = pickScopeMetric(quality.minListing, scopeLevel);
+    const averageSalePrice = pickScopeMetric(quality.averageSalePrice, scopeLevel);
+    const dailySaleVelocity = pickScopeMetric(quality.dailySaleVelocity, scopeLevel);
+    const recentPurchase = pickScopeMetric(quality.recentPurchase, scopeLevel);
+    const currentPrice = positiveOrNull(minListing?.price);
+    const saleQuantity = positiveOrNull(dailySaleVelocity?.quantity) || 0;
+    const avgSalePrice = positiveOrNull(averageSalePrice?.price);
+    const recentPrice = positiveOrNull(recentPurchase?.price);
+    return {
+      quality: qualityKey,
+      currentPrice,
+      currentPriceWorldId: numberOrNull(minListing?.worldId),
+      saleQuantity,
+      averageSalePrice: avgSalePrice,
+      salesAmount: avgSalePrice != null ? avgSalePrice * saleQuantity : 0,
+      recentPrice,
+      recentPurchaseWorldId: numberOrNull(recentPurchase?.worldId),
+      recentTimestamp: numberOrNull(recentPurchase?.timestamp),
+    };
+  };
+  const combineAggregatedItem = (result, itemLookup, options = {}) => {
+    const itemId = Number(result?.itemId || result?.itemID || 0);
+    if (!itemId) return null;
+    const scopeLevel = options.scopeLevel || "region";
+    const qualities = qualityKeys.map((qualityKey) => readQualitySummary(result, qualityKey, scopeLevel));
+    const pricedQuality = qualities.filter((entry) => entry.currentPrice != null).sort((left, right) => left.currentPrice - right.currentPrice)[0] || null;
+    const recentQuality = qualities.filter((entry) => entry.recentTimestamp != null).sort((left, right) => right.recentTimestamp - left.recentTimestamp)[0] || null;
+    const saleQuantity = qualities.reduce((sum, entry) => sum + entry.saleQuantity, 0);
+    const salesAmount = qualities.reduce((sum, entry) => sum + entry.salesAmount, 0);
+    const uploadTimes = Array.isArray(result?.worldUploadTimes) ? result.worldUploadTimes : [];
+    const scopedUploadTimes = options.scopeWorldId ? uploadTimes.filter((entry) => Number(entry.worldId) === Number(options.scopeWorldId)) : uploadTimes;
+    const meta = resolveItemMeta(itemLookup, itemId);
+    const worldId = pricedQuality?.currentPriceWorldId || recentQuality?.recentPurchaseWorldId || options.scopeWorldId || null;
+    return {
+      itemId,
+      itemName: getMetaName(meta, itemId),
+      icon: getMetaIcon(meta),
+      currentPrice: pricedQuality?.currentPrice ?? null,
+      currentPriceWorldId: pricedQuality?.currentPriceWorldId ?? null,
+      saleQuantity,
+      averageSalePrice: saleQuantity > 0 && salesAmount > 0 ? salesAmount / saleQuantity : null,
+      salesAmount,
+      recentPrice: recentQuality?.recentPrice ?? null,
+      recentPurchaseWorldId: recentQuality?.recentPurchaseWorldId ?? null,
+      scopeType: options.scopeType || scopeLevel,
+      scopeName: options.scopeName || "",
+      worldId,
+      worldName: typeof options.worldNameResolver === "function" ? String(options.worldNameResolver(worldId) || "") : "",
+      updatedAt: maxTimestamp([maxTimestamp(scopedUploadTimes.map((entry) => entry.timestamp)), recentQuality?.recentTimestamp]),
+      qualities,
+    };
+  };
+  const buildSalesRanking = (aggregatedResults, itemLookup, options = {}) => {
+    const limit = Math.max(1, Number(options.limit || 30));
+    const rows = (Array.isArray(aggregatedResults) ? aggregatedResults : [])
+      .map((result) => combineAggregatedItem(result, itemLookup, options))
+      .filter(Boolean)
+      .filter((row) => hasMetric(row, "revenue") || hasMetric(row, "quantity") || hasMetric(row, "price"));
+    const byRevenue = sortRowsByMetric(rows.filter((row) => hasMetric(row, "revenue")), "revenue").slice(0, limit);
+    const byQuantity = sortRowsByMetric(rows.filter((row) => hasMetric(row, "quantity")), "quantity").slice(0, limit);
+    const byPrice = sortRowsByMetric(rows.filter((row) => hasMetric(row, "price")), "price").slice(0, limit);
+    return {
+      rows,
+      byRevenue,
+      byQuantity,
+      byPrice,
+      topSoldItem: byQuantity[0] || null,
+      highestPriceItem: byPrice[0] || null,
+      limit,
+      scopeName: options.scopeName || "",
+      scopeType: options.scopeType || options.scopeLevel || "",
+      generatedAt: options.generatedAt || Date.now(),
+    };
+  };
+  const calculateRecipeProfit = (input = {}) => {
+    const ingredients = Array.isArray(input.ingredients) ? input.ingredients : [];
+    const amountResult = Math.max(1, Number(input.amountResult ?? input.recipe?.AmountResult ?? 1) || 1);
+    const taxRateRaw = Number(input.taxRate ?? 0.05);
+    const taxRate = Number.isFinite(taxRateRaw) && taxRateRaw >= 0 ? taxRateRaw : 0.05;
+    const ingredientLines = ingredients.map((ingredient) => {
+      const amount = Math.max(0, Number(ingredient.amount || 0));
+      const unitPrice = positiveOrNull(ingredient.unitPrice);
+      return {
+        ...ingredient,
+        amount,
+        unitPrice,
+        hasPrice: unitPrice != null,
+        subtotal: unitPrice != null ? unitPrice * amount : null,
+      };
+    });
+    const missingPriceCount = ingredientLines.filter((entry) => !entry.hasPrice).length;
+    const knownCost = ingredientLines.reduce((sum, entry) => sum + (entry.subtotal || 0), 0);
+    const totalCost = missingPriceCount ? null : knownCost;
+    const resultUnitPrice = positiveOrNull(input.resultUnitPrice);
+    const grossRevenue = resultUnitPrice != null ? resultUnitPrice * amountResult : null;
+    const estimatedTax = grossRevenue != null ? Math.round(grossRevenue * taxRate) : null;
+    const netRevenue = grossRevenue != null ? grossRevenue - estimatedTax : null;
+    const netProfit = totalCost != null && netRevenue != null ? netRevenue - totalCost : null;
+    return {
+      amountResult,
+      taxRate,
+      ingredientLines,
+      missingPriceCount,
+      knownCost,
+      totalCost,
+      resultUnitPrice,
+      grossRevenue,
+      estimatedTax,
+      netRevenue,
+      netProfit,
+      profitRate: totalCost != null && totalCost > 0 && netProfit != null ? netProfit / totalCost : null,
+      canCalculateProfit: missingPriceCount === 0 && resultUnitPrice != null,
+    };
+  };
+  return { buildSalesRanking, calculateRecipeProfit, combineAggregatedItem, sortRowsByMetric };
+}
+
+function getSalesRankingScope() {
+  const rawValue = dom.salesRankingScope?.value || state.salesRankingScope || "region:中国";
+  const [type, ...nameParts] = String(rawValue).split(":");
+  const name = nameParts.join(":") || "中国";
+  if (type === "world") {
+    const world = state.worlds.find((entry) => entry.name === name);
+    return {
+      type,
+      value: rawValue,
+      name,
+      apiName: name,
+      scopeLevel: "world",
+      scopeWorldId: Number(world?.id || 0) || null,
+    };
+  }
+  if (type === "dc") {
+    return {
+      type,
+      value: rawValue,
+      name,
+      apiName: name,
+      scopeLevel: "dc",
+      scopeWorldId: null,
+    };
+  }
+  return {
+    type: "region",
+    value: "region:中国",
+    name: "中国",
+    apiName: "中国",
+    scopeLevel: "region",
+    scopeWorldId: null,
+  };
+}
+
+function renderSalesRankingIdle() {
+  if (!dom.salesRankingStatus || !dom.salesRankingSummary || !dom.salesRankingTableBody) {
+    return;
+  }
+  const scope = getSalesRankingScope();
+  dom.salesRankingStatus.innerHTML = `<div class="notice notice--soft">当前范围：${escapeHtml(scope.name)}。点击“加载排行”后再读取销售排行数据。</div>`;
+  dom.salesRankingSummary.innerHTML = "";
+  dom.salesRankingTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">点击“加载排行”后显示前 ${SALES_RANKING_LIMIT} 名</td></tr>`;
+  state.currentSalesRanking = null;
+  renderSalesRankingTabs();
+}
+
+function renderSalesRankingLoading(scope, processed, total) {
+  const progress = total > 0 ? `（${formatNumber(processed)} / ${formatNumber(total)}）` : "";
+  dom.salesRankingStatus.innerHTML = `<div class="loading">正在读取 ${escapeHtml(scope.name)} 销售排行 ${progress}</div>`;
+  dom.salesRankingSummary.innerHTML = "";
+  dom.salesRankingTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">排行数据加载中</td></tr>`;
+}
+
+function renderSalesRankingError(error) {
+  const message = escapeHtml(error?.message || String(error || "未知错误"));
+  dom.salesRankingStatus.innerHTML = `<div class="notice notice--warn">销售排行读取失败：${message}</div>`;
+  dom.salesRankingSummary.innerHTML = "";
+  dom.salesRankingTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">接口异常，暂时无法展示排行</td></tr>`;
+}
+
+function renderSalesRankingTabs() {
+  dom.salesRankingTabs?.querySelectorAll("[data-sales-ranking-mode]").forEach((button) => {
+    const isActive = button.getAttribute("data-sales-ranking-mode") === state.salesRankingMode;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
+}
+
+async function loadSalesRanking() {
+  const calc = getCalculationApi();
+  if (!calc) {
+    renderSalesRankingError(new Error("缺少市场计算模块"));
+    return;
+  }
+
+  const scope = getSalesRankingScope();
+  state.salesRankingScope = scope.value;
+  const token = ++state.salesRankingToken;
+  dom.salesRankingButton.disabled = true;
+  renderSalesRankingLoading(scope, 0, 0);
+  const preview = getCachedSalesRanking(scope);
+  if (preview) {
+    state.currentSalesRanking = preview.ranking;
+    renderSalesRankingResult(preview.ranking, { isCachePreview: true, refreshing: true });
+  }
+
+  try {
+    const ranking = await getSalesRanking(scope, (processed, total) => {
+      if (token === state.salesRankingToken && !preview) {
+        renderSalesRankingLoading(scope, processed, total);
+      }
+    }, { forceRefresh: true });
+    if (token !== state.salesRankingToken) {
+      return;
+    }
+    state.currentSalesRanking = ranking;
+    renderSalesRankingResult(ranking);
+  } catch (error) {
+    if (token === state.salesRankingToken) {
+      console.error("销售排行读取失败", error);
+      if (preview) {
+        state.currentSalesRanking = preview.ranking;
+        renderSalesRankingResult(preview.ranking, { isCachePreview: true, refreshFailed: true, error });
+      } else {
+        renderSalesRankingError(error);
+      }
+    }
+  } finally {
+    if (token === state.salesRankingToken) {
+      dom.salesRankingButton.disabled = false;
+    }
+  }
+}
+
+async function getSalesRanking(scope, onProgress, options = {}) {
+  const now = Date.now();
+  const cacheKey = getSalesRankingCacheKey(scope);
+  if (!options.forceRefresh) {
+    const cached = getCachedSalesRanking(scope, now);
+    if (cached && cached.source === "memory") {
+      return cached.ranking;
+    }
+  }
+
+  const marketableIds = await getMarketableItemIds();
+  const mappedMarketableIds = marketableIds.filter((itemId) => state.itemMappingById?.has(itemId));
+  const targetIds = mappedMarketableIds.length ? mappedMarketableIds : marketableIds;
+  const allResults = [];
+  const failedBatches = [];
+  const batches = chunkArray(targetIds, SALES_RANKING_BATCH_SIZE);
+  let processed = 0;
+  onProgress?.(processed, targetIds.length);
+
+  await runWithConcurrency(batches, SALES_RANKING_CONCURRENCY, async (batch) => {
+    try {
+      const payload = await fetchAggregatedMarket(scope.apiName, batch, {
+        timeoutMs: SALES_RANKING_BATCH_TIMEOUT_MS,
+      });
+      if (Array.isArray(payload.results)) {
+        allResults.push(...payload.results);
+      }
+    } catch (error) {
+      console.error("销售排行批次读取失败", error);
+      failedBatches.push({ batch, error });
+    } finally {
+      processed += batch.length;
+      onProgress?.(processed, targetIds.length);
+    }
+  });
+
+  const calc = getCalculationApi();
+  const ranking = calc.buildSalesRanking(allResults, (itemId) => state.itemMappingById?.get(Number(itemId)), {
+    limit: SALES_RANKING_LIMIT,
+    scopeLevel: scope.scopeLevel,
+    scopeType: scope.type,
+    scopeName: scope.name,
+    scopeWorldId: scope.scopeWorldId,
+    worldNameResolver: getWorldNameById,
+    generatedAt: now,
+  });
+  ranking.requestedItemCount = targetIds.length;
+  ranking.loadedItemCount = allResults.length;
+  ranking.failedBatchCount = failedBatches.length;
+  ranking.rowCount = ranking.rows.length;
+  await hydrateSalesRankingNames(ranking);
+  state.caches.salesRanking.set(cacheKey, { loadedAt: now, ranking });
+  saveSalesRankingStorageCache(cacheKey, now, ranking);
+  return ranking;
+}
+
+async function hydrateSalesRankingNames(ranking) {
+  const rows = [
+    ...(ranking?.byPrice || []),
+    ...(ranking?.byQuantity || []),
+    ranking?.topSoldItem,
+    ranking?.highestPriceItem,
+  ].filter(Boolean);
+  const missingIds = uniqueNumbers(rows
+    .filter((row) => needsRankingNameHydration(row))
+    .map((row) => Number(row.itemId || 0))
+    .filter((itemId) => itemId > 0))
+    .slice(0, SALES_RANKING_LIMIT * 2);
+
+  if (!missingIds.length) {
+    return;
+  }
+
+  await runWithConcurrency(missingIds, 6, async (itemId) => {
+    const item = await getItem(itemId).catch(() => null);
+    const name = getPreferredItemName(item);
+    if (!name || isFallbackRankingName(name, itemId)) {
+      return;
+    }
+    const aliasMeta = state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null;
+    state.resolvedAliases.set(itemId, {
+      preferredName: name,
+      preferredEnglishName: item?.Name_en || aliasMeta?.preferredEnglishName || aliasMeta?.englishName || "",
+      preferredDescription: item?.Description || aliasMeta?.preferredDescription || aliasMeta?.description || "",
+      icon: item?.Icon || aliasMeta?.icon || "",
+      fast: true,
+    });
+  });
+}
+
+function needsRankingNameHydration(row) {
+  const itemId = Number(row?.itemId || 0);
+  if (!itemId) {
+    return false;
+  }
+  return isFallbackRankingName(row?.itemName, itemId) && !getPreferredItemNameById(itemId, "");
+}
+
+function getSalesRankingCacheKey(scope) {
+  return `${scope.value}|${state.itemMappingEntries?.length || 0}`;
+}
+
+function getCachedSalesRanking(scope, now = Date.now()) {
+  const cacheKey = getSalesRankingCacheKey(scope);
+  const cached = state.caches.salesRanking.get(cacheKey);
+  if (cached && now - cached.loadedAt < SALES_RANKING_CACHE_TTL_MS) {
+    return { ...cached, source: "memory" };
+  }
+  const stored = loadSalesRankingStorageCache(cacheKey, now);
+  if (stored) {
+    state.caches.salesRanking.set(cacheKey, { loadedAt: stored.loadedAt, ranking: stored.ranking });
+    return { ...stored, source: "storage" };
+  }
+  return null;
+}
+
+function loadSalesRankingStorageCache(cacheKey, now = Date.now()) {
+  try {
+    const raw = localStorage.getItem(SALES_RANKING_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    const entry = parsed?.[cacheKey];
+    if (!entry?.ranking || !Number.isFinite(Number(entry.loadedAt))) {
+      return null;
+    }
+    if (now - Number(entry.loadedAt) > SALES_RANKING_STORAGE_TTL_MS) {
+      return null;
+    }
+    return { loadedAt: Number(entry.loadedAt), ranking: entry.ranking };
+  } catch {
+    return null;
+  }
+}
+
+function saveSalesRankingStorageCache(cacheKey, loadedAt, ranking) {
+  try {
+    const raw = localStorage.getItem(SALES_RANKING_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const next = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    next[cacheKey] = { loadedAt, ranking: toCompactSalesRanking(ranking) };
+    const entries = Object.entries(next)
+      .filter(([, entry]) => loadedAt - Number(entry?.loadedAt || 0) <= SALES_RANKING_STORAGE_TTL_MS)
+      .sort((left, right) => Number(right[1]?.loadedAt || 0) - Number(left[1]?.loadedAt || 0))
+      .slice(0, 8);
+    localStorage.setItem(SALES_RANKING_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch {
+    // ignore storage failures
+  }
+}
+
+function toCompactSalesRanking(ranking) {
+  return {
+    byQuantity: compactRankingRows(ranking?.byQuantity),
+    byPrice: compactRankingRows(ranking?.byPrice),
+    topSoldItem: compactRankingRow(ranking?.topSoldItem),
+    highestPriceItem: compactRankingRow(ranking?.highestPriceItem),
+    limit: ranking?.limit || SALES_RANKING_LIMIT,
+    scopeName: ranking?.scopeName || "",
+    scopeType: ranking?.scopeType || "",
+    generatedAt: ranking?.generatedAt || Date.now(),
+    requestedItemCount: ranking?.requestedItemCount || 0,
+    loadedItemCount: ranking?.loadedItemCount || 0,
+    failedBatchCount: ranking?.failedBatchCount || 0,
+    rowCount: ranking?.rowCount ?? ranking?.rows?.length ?? 0,
+    rows: [],
+  };
+}
+
+function compactRankingRows(rows) {
+  return Array.isArray(rows) ? rows.map(compactRankingRow).filter(Boolean) : [];
+}
+
+function compactRankingRow(row) {
+  if (!row) {
+    return null;
+  }
+  return {
+    itemId: row.itemId,
+    itemName: getRankingDisplayName(row),
+    icon: getRankingIcon(row),
+    currentPrice: row.currentPrice,
+    saleQuantity: row.saleQuantity,
+    averageSalePrice: row.averageSalePrice,
+    salesAmount: row.salesAmount,
+    scopeName: row.scopeName,
+    worldName: row.worldName,
+    updatedAt: row.updatedAt,
+  };
+}
+
+async function getMarketableItemIds() {
+  if (state.caches.marketableItems) {
+    return state.caches.marketableItems;
+  }
+  const promise = fetchJson(`${MARKET_API}/marketable`).then((payload) =>
+    (Array.isArray(payload) ? payload : [])
+      .map(Number)
+      .filter((itemId) => Number.isFinite(itemId) && itemId > 0)
+  );
+  state.caches.marketableItems = promise;
+  return promise;
+}
+
+async function fetchAggregatedMarket(scopeName, itemIds, options = {}) {
+  const idText = itemIds.map(Number).filter(Boolean).join(",");
+  if (!idText) {
+    return { results: [], failedItems: [] };
+  }
+  return fetchJson(`${MARKET_API}/aggregated/${encodeURIComponent(scopeName)}/${encodeURIComponent(idText)}`, {
+    timeoutMs: options.timeoutMs,
+  });
+}
+
+function chunkArray(values, size) {
+  const chunkSize = Math.max(1, Number(size) || 1);
+  const chunks = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+async function runWithConcurrency(items, concurrency, worker) {
+  const limit = Math.max(1, Number(concurrency) || 1);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor];
+      cursor += 1;
+      await worker(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+function renderSalesRankingResult(ranking, options = {}) {
+  renderSalesRankingTabs();
+  const scopeName = ranking?.scopeName || getSalesRankingScope().name;
+  const rowCount = ranking?.rowCount ?? ranking?.rows?.length ?? 0;
+  const topSoldItem = ranking?.topSoldItem;
+  const highestPriceItem = ranking?.highestPriceItem;
+  const topSoldItemName = getRankingDisplayName(topSoldItem);
+  const highestPriceItemName = getRankingDisplayName(highestPriceItem);
+  const updatedText = formatTime(ranking?.generatedAt);
+  const refreshText = options.isCachePreview
+    ? (options.refreshFailed
+      ? `当前显示 ${updatedText} 的本地缓存，最新刷新失败：${escapeHtml(options.error?.message || String(options.error || "未知错误"))}。`
+      : `当前先显示 ${updatedText} 的本地缓存，正在后台刷新最新数据。`)
+    : "";
+  const loadSummary = options.isCachePreview
+    ? refreshText
+    : ranking?.failedBatchCount > 0
+    ? `已载入 ${formatNumber(ranking.loadedItemCount || rowCount)} 条返回数据，${formatNumber(ranking.failedBatchCount)} 个批次读取失败，当前结果为部分数据。`
+    : `已载入 ${formatNumber(ranking.loadedItemCount || rowCount)} 条返回数据。`;
+  dom.salesRankingStatus.innerHTML = `<div class="notice notice--soft">已载入 ${escapeHtml(scopeName)} 销售排行，默认展示前 ${ranking?.limit || SALES_RANKING_LIMIT} 名。${loadSummary}</div>`;
+  dom.salesRankingSummary.innerHTML = `
+    <div class="market-overview-grid ranking-summary-grid">
+      <div class="metric-card">
+        <div class="metric-card__label">当前服务器卖得最多</div>
+        <div class="metric-card__value">${topSoldItem ? escapeHtml(topSoldItemName) : "暂无"}</div>
+        <div class="metric-card__detail">${topSoldItem ? `${formatNumber(Math.round(topSoldItem.saleQuantity))} / 日` : "当前范围没有读取到销量数据。"}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card__label">当前服务器价格最高</div>
+        <div class="metric-card__value">${highestPriceItem ? escapeHtml(highestPriceItemName) : "暂无"}</div>
+        <div class="metric-card__detail">${highestPriceItem ? formatPrice(highestPriceItem.currentPrice) : "当前范围没有读取到上架价格。"}</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card__label">参与排行物品</div>
+        <div class="metric-card__value">${formatNumber(rowCount)}</div>
+        <div class="metric-card__detail">仅统计本地映射表可识别且接口返回销售或价格数据的物品。</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card__label">更新时间</div>
+        <div class="metric-card__value">${escapeHtml(updatedText)}</div>
+        <div class="metric-card__detail">缓存仅作快速预览，点击加载会继续刷新最新数据。</div>
+      </div>
+    </div>
+  `;
+  renderSalesRankingTable();
+}
+
+function getActiveSalesRankingRows() {
+  const ranking = state.currentSalesRanking;
+  if (!ranking) {
+    return [];
+  }
+  if (state.salesRankingMode === "quantity") {
+    return ranking.byQuantity || [];
+  }
+  return ranking.byPrice || [];
+}
+
+function renderSalesRankingTable() {
+  if (!dom.salesRankingTableBody) {
+    return;
+  }
+  const rows = getActiveSalesRankingRows();
+  if (!state.currentSalesRanking) {
+    renderSalesRankingTabs();
+    return;
+  }
+  if (!rows.length) {
+    dom.salesRankingTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">当前范围暂无可排序的销售数据</td></tr>`;
+    return;
+  }
+  dom.salesRankingTableBody.innerHTML = rows.map((row, index) => {
+    const displayName = getRankingDisplayName(row);
+    const iconUrl = resolveRankingIconUrl(getRankingIcon(row));
+    const fallbackIconUrls = getRankingIconFallbackUrls(row, iconUrl);
+    const fallbackAttr = fallbackIconUrls.length ? ` data-fallback-srcs="${escapeHtml(JSON.stringify(fallbackIconUrls))}"` : "";
+    return `
+      <tr>
+        <td>${index + 1}</td>
+        <td>
+          <div class="ranking-item">
+            <span class="ranking-item__icon">${iconUrl ? `<img src="${escapeHtml(iconUrl)}"${fallbackAttr} alt="${escapeHtml(displayName)}" loading="eager" decoding="async" referrerpolicy="no-referrer" onerror="handleRankingIconError(this)">` : ""}</span>
+            <span>${renderRouteLink(row.itemId, displayName, "item") || escapeHtml(displayName)}</span>
+          </div>
+        </td>
+        <td>${escapeHtml(row.scopeName || getSalesRankingScope().name)}</td>
+        <td>${row.currentPrice == null ? "暂无" : formatPrice(row.currentPrice)}</td>
+        <td>${formatNumber(Math.round(row.saleQuantity || 0))}</td>
+        <td>${row.averageSalePrice == null ? "暂无" : formatPrice(Math.round(row.averageSalePrice))}</td>
+        <td>${formatTime(row.updatedAt)}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function getRankingDisplayName(row) {
+  const itemId = Number(row?.itemId || 0);
+  const fallback = String(row?.itemName || "").trim();
+  if (!itemId) {
+    return fallback;
+  }
+  const preferred = getPreferredItemNameById(itemId, "");
+  if (preferred) {
+    return preferred;
+  }
+  return fallback || `Item #${itemId}`;
+}
+
+function isFallbackRankingName(name, itemId) {
+  const text = String(name || "").trim();
+  if (!text) {
+    return true;
+  }
+  const id = Number(itemId || 0);
+  if (!id) {
+    return false;
+  }
+  return new RegExp(`^(?:item\\s*#?|#|物品\\s*#?)\\s*${id}$`, "i").test(text);
+}
+
+function getRankingIcon(row) {
+  const itemId = Number(row?.itemId || 0);
+  const aliasMeta = itemId ? (state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null) : null;
+  return String(aliasMeta?.icon || aliasMeta?.iconUrl || aliasMeta?.IconUrl || aliasMeta?.iconPath || aliasMeta?.IconPath || row?.icon || "");
+}
+
+function getRankingIconFallbackUrls(row, primaryUrl) {
+  const itemId = Number(row?.itemId || 0);
+  const aliasMeta = itemId ? (state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null) : null;
+  const normalizedPath = [
+    aliasMeta?.iconPath,
+    aliasMeta?.IconPath,
+    row?.iconPath,
+    row?.IconPath,
+    aliasMeta?.icon,
+    aliasMeta?.iconUrl,
+    aliasMeta?.IconUrl,
+    row?.icon,
+  ].map(normalizeIconPath).find(Boolean);
+  const primary = String(primaryUrl || "");
+  const urls = [];
+  const addUrl = (url) => {
+    if (url && url !== primary && !urls.includes(url)) {
+      urls.push(url);
+    }
+  };
+  if (normalizedPath) {
+    addUrl(`https://cafemaker.wakingsands.com/i/${normalizedPath}`);
+    addUrl(`https://xivapi.com/i/${normalizedPath}`);
+  }
+  if (primary.includes("cafemaker.wakingsands.com/i/")) {
+    addUrl(primary.replace("https://cafemaker.wakingsands.com/i/", "https://xivapi.com/i/"));
+  }
+  if (primary.includes("xivapi.com/i/")) {
+    addUrl(primary.replace("https://xivapi.com/i/", "https://cafemaker.wakingsands.com/i/"));
+  }
+  return urls;
+}
+
+function resolveRankingIconUrl(iconPath) {
+  if (!iconPath) {
+    return "";
+  }
+  const proxyUrl = iconPathToProxyUrl(iconPath);
+  if (proxyUrl) {
+    return proxyUrl;
+  }
+  if (/^https?:\/\//i.test(iconPath)) {
+    return iconPath;
+  }
+  return xivApiIconPathToUrl(iconPath);
+}
+
+function handleRankingIconError(image) {
+  if (!(image instanceof HTMLImageElement)) {
+    return;
+  }
+
+  let fallbacks = [];
+  try {
+    const parsed = JSON.parse(image.dataset.fallbackSrcs || "[]");
+    if (Array.isArray(parsed)) {
+      fallbacks = parsed.map(String).filter(Boolean);
+    }
+  } catch {
+    fallbacks = [];
+  }
+
+  const current = image.currentSrc || image.src;
+  const nextIndex = fallbacks.findIndex((url) => url && url !== current);
+  if (nextIndex >= 0) {
+    const nextUrl = fallbacks[nextIndex];
+    image.dataset.fallbackSrcs = JSON.stringify(fallbacks.slice(nextIndex + 1));
+    image.src = nextUrl;
+    return;
+  }
+
+  image.classList.add("is-hidden");
+}
+
+window.handleRankingIconError = handleRankingIconError;
+
+function getWorldNameById(worldId) {
+  const world = state.worldMap.get(Number(worldId));
+  return world?.name || (worldId ? `#${worldId}` : "");
+}
+
+async function loadRecipeProfit(recipe, selectedScope = null) {
+  const recipeId = Number(recipe.ID || 0);
+  const panel = document.getElementById(`recipe-profit-${recipeId}`);
+  if (!panel) {
+    return;
+  }
+
+  const ingredients = collectRecipeIngredients(recipe);
+  if (!ingredients.length) {
+    panel.innerHTML = `<div class="notice notice--soft">当前配方没有可读取的材料数据。</div>`;
+    return;
+  }
+
+  const scope = selectedScope || getSelectedRecipeProfitScope(recipeId);
+  panel.innerHTML = `<div class="loading">正在读取 ${escapeHtml(scope.name)} 材料价格并计算利润</div>`;
+
+  try {
+    const pricedIngredients = await Promise.all(ingredients.map(async (ingredient) => ({
+      ...ingredient,
+      unitPrice: await getLowestMarketPrice(ingredient.itemId, scope),
+    })));
+    const resultItemId = Number(recipe.ItemResultTargetID || recipe.ItemResult?.ID || 0);
+    const resultUnitPrice = resultItemId ? await getLowestMarketPrice(resultItemId, scope) : null;
+    const calc = getCalculationApi();
+    const calculation = calc.calculateRecipeProfit({
+      recipe,
+      amountResult: recipe.AmountResult || 1,
+      resultUnitPrice,
+      taxRate: SALES_RANKING_TAX_RATE,
+      ingredients: pricedIngredients,
+    });
+    panel.innerHTML = renderRecipeProfitResult(recipe, calculation, scope);
+  } catch (error) {
+    console.error("利润计算失败", error);
+    panel.innerHTML = `<div class="notice notice--warn">利润计算失败：${escapeHtml(error?.message || String(error))}</div>`;
+  }
+}
+
+function getRecipeProfitScopeOptions() {
+  return getMarketScopeOptions();
+}
+
+function getDefaultRecipeProfitScopeValue() {
+  if (state.selectedRegion && state.selectedRegion !== "全部") {
+    return `dc:${state.selectedRegion}`;
+  }
+  const rankingScope = getSalesRankingScope();
+  if (rankingScope.type === "world" || rankingScope.type === "dc") {
+    return rankingScope.value;
+  }
+  return "region:中国";
+}
+
+function getSelectedRecipeProfitScope(recipeId) {
+  const selector = document.querySelector(`[data-profit-scope-recipe-id="${Number(recipeId)}"]`);
+  return parseRecipeProfitScope(selector?.value || getDefaultRecipeProfitScopeValue());
+}
+
+function parseRecipeProfitScope(rawValue) {
+  const [type, ...nameParts] = String(rawValue || "region:中国").split(":");
+  const name = nameParts.join(":") || "中国";
+  if (type === "world" && name) {
+    const world = state.worlds.find((entry) => entry.name === name);
+    return {
+      type: "world",
+      value: `world:${name}`,
+      name,
+      apiName: name,
+      scopeLevel: "world",
+      scopeWorldId: Number(world?.id || 0) || null,
+    };
+  }
+  if (type === "dc" && name) {
+    return {
+      type: "dc",
+      value: `dc:${name}`,
+      name,
+      apiName: name,
+      scopeLevel: "dc",
+      scopeWorldId: null,
+    };
+  }
+  return {
+    type: "region",
+    value: "region:中国",
+    name: "中国全区",
+    apiName: "中国",
+    scopeLevel: "region",
+    scopeWorldId: null,
+  };
+}
+
+async function getLowestMarketPrice(itemId, scope) {
+  const itemRows = await getMarketRows(itemId);
+  const rows = itemRows.filter((row) => {
+    if (scope.type === "world") {
+      return row.worldName === scope.name;
+    }
+    if (scope.type === "dc") {
+      return getRowMarketRegion(row) === scope.name;
+    }
+    return true;
+  });
+  const priced = rows
+    .map((row) => row?.qualityStats?.all?.minPrice ?? row?.minPrice ?? null)
+    .filter((price) => price != null)
+    .sort((left, right) => left - right);
+  return priced[0] ?? null;
+}
+
+function renderRecipeProfitResult(recipe, calculation, scope) {
+  const resultName = recipe.ItemResult?.Name || recipe.Name || `配方 #${recipe.ID}`;
+  const profitClass = calculation.netProfit == null ? "" : (calculation.netProfit >= 0 ? "is-profit" : "is-loss");
+  const materialMarkup = calculation.ingredientLines.map((line) => `
+    <div class="profit-material">
+      <span class="profit-material__name">${renderRouteLink(line.itemId, line.name, "item") || escapeHtml(line.name)}</span>
+      <span class="profit-material__price">${line.hasPrice ? formatPrice(line.unitPrice) : "暂无价格"}</span>
+      <span class="profit-material__amount">x${formatNumber(line.amount)}</span>
+      <span class="profit-material__subtotal">${line.subtotal == null ? "不计入" : formatPrice(line.subtotal)}</span>
+    </div>
+  `).join("");
+  const missingHint = calculation.missingPriceCount
+    ? `<div class="notice notice--warn">有 ${calculation.missingPriceCount} 种材料暂无价格，因此不展示总成本和净利润，避免误导。</div>`
+    : "";
+  const resultPriceHint = calculation.resultUnitPrice == null
+    ? `<div class="notice notice--warn">成品当前没有读取到售价，暂不能计算预计利润。</div>`
+    : "";
+
+  return `
+    <div class="recipe-profit-result">
+      <div class="profit-material-list">
+        <div class="profit-material profit-material--head">
+          <span>材料</span>
+          <span>当前单价</span>
+          <span>数量</span>
+          <span>小计</span>
+        </div>
+        ${materialMarkup}
+      </div>
+      <div class="profit-summary-grid">
+        <div class="metric-card">
+          <div class="metric-card__label">成本总价</div>
+          <div class="metric-card__value">${calculation.totalCost == null ? "无法计算" : formatPrice(calculation.totalCost)}</div>
+          <div class="metric-card__detail">范围：${escapeHtml(scope.name)}，按材料当前最低价估算。</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-card__label">当前售卖最低价</div>
+          <div class="metric-card__value">${calculation.resultUnitPrice == null ? "暂无价格" : formatPrice(calculation.resultUnitPrice)}</div>
+          <div class="metric-card__detail">${escapeHtml(resultName)} · 产出 ${calculation.amountResult}</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-card__label">预计税费</div>
+          <div class="metric-card__value">${calculation.estimatedTax == null ? "暂无" : formatPrice(calculation.estimatedTax)}</div>
+          <div class="metric-card__detail">按市场常见 ${Math.round(calculation.taxRate * 100)}% 税费估算。</div>
+        </div>
+        <div class="metric-card ${profitClass}">
+          <div class="metric-card__label">预计净利润</div>
+          <div class="metric-card__value">${calculation.netProfit == null ? "无法计算" : formatPrice(calculation.netProfit)}</div>
+          <div class="metric-card__detail">利润率：${calculation.profitRate == null ? "暂无" : `${(calculation.profitRate * 100).toFixed(1)}%`}</div>
+        </div>
+      </div>
+      ${missingHint}
+      ${resultPriceHint}
     </div>
   `;
 }
@@ -2362,12 +3373,27 @@ function uniqueNumbers(values) {
   return [...new Set(values.filter((value) => Number.isFinite(Number(value))).map(Number))];
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`请求失败 ${response.status}: ${url}`);
+async function fetchJson(url, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 0);
+  const controller = timeoutMs > 0 && typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+
+  try {
+    const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+    if (!response.ok) {
+      throw new Error(`请求失败 ${response.status}: ${url}`);
+    }
+    return response.json();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`请求超时: ${url}`);
+    }
+    throw error;
+  } finally {
+    if (timer) {
+      window.clearTimeout(timer);
+    }
   }
-  return response.json();
 }
 
 function renderRouteLink(id, name, type) {
@@ -2405,8 +3431,16 @@ function toIconUrl(iconPath) {
   if (!iconPath) {
     return "";
   }
+  const proxyUrl = iconPathToProxyUrl(iconPath);
+  if (proxyUrl) {
+    return proxyUrl;
+  }
   if (/^https?:\/\//.test(iconPath)) {
     return iconPath;
+  }
+  const normalized = normalizeIconPath(iconPath);
+  if (normalized) {
+    return `https://cafemaker.wakingsands.com/i/${normalized}`;
   }
   return `https://cafemaker.wakingsands.com${iconPath}`;
 }
@@ -2415,8 +3449,67 @@ function xivApiIconPathToUrl(path) {
   if (!path) {
     return "";
   }
-  const normalized = String(path).replace(/^ui\/icon\//, "").replace(/\.tex$/i, ".png");
-  return `https://xivapi.com/i/${normalized}`;
+  if (/^https?:\/\//i.test(path) && !normalizeIconPath(path)) {
+    return path;
+  }
+  const normalized = normalizeIconPath(path);
+  if (!normalized) {
+    return "";
+  }
+  return `https://cafemaker.wakingsands.com/i/${normalized}`;
+}
+
+function iconPathToProxyUrl(iconPath) {
+  const normalized = normalizeIconPath(iconPath);
+  if (!normalized || !canUseLocalIconProxy()) {
+    return "";
+  }
+  return `${window.location.origin}${ICON_PROXY_ENDPOINT}?path=${encodeURIComponent(normalized)}`;
+}
+
+function canUseLocalIconProxy() {
+  if (typeof window === "undefined" || !window.location) {
+    return false;
+  }
+  return (window.location.protocol === "http:" || window.location.protocol === "https:")
+    && LOCAL_ICON_PROXY_HOSTS.has(window.location.hostname);
+}
+
+function normalizeIconPath(iconPath) {
+  if (!iconPath) {
+    return "";
+  }
+
+  let value = String(iconPath).trim();
+  if (!value) {
+    return "";
+  }
+
+  try {
+    if (/^https?:\/\//i.test(value)) {
+      value = new URL(value).pathname;
+    }
+  } catch {
+    // Keep the original value and let the path validation reject invalid input.
+  }
+
+  value = value
+    .replace(/\\/g, "/")
+    .replace(/^https?:\/\/[^/]+/i, "")
+    .split("?")[0]
+    .split("#")[0]
+    .replace(/^\/+/, "")
+    .replace(/^i\//i, "")
+    .replace(/^ui\/icon\//i, "")
+    .replace(/\.tex$/i, ".png");
+
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    // Ignore malformed escapes; validation below will reject unsafe paths.
+  }
+
+  return /^\d{6}\/\d{6}\.png$/i.test(value) ? value : "";
 }
 
 function formatPrice(value) {
@@ -2503,7 +3596,7 @@ async function openWikiSearch(query) {
   window.open(target, "_blank", "noopener,noreferrer");
 }
 
-const ITEM_MAPPING_URL = "./data/item_mapping.min.json";
+const ITEM_MAPPING_URL = "./data/item_mapping.min.json?v=20260528-v2";
 
 async function loadItemMapping() {
   try {
@@ -2519,7 +3612,8 @@ async function loadItemMapping() {
         itemId: Number(itemId),
         name: String(zhName || ""),
         englishName: String(enName || ""),
-        icon: iconPath ? `https://xivapi.com/i/${iconPath}` : "",
+        icon: iconPath ? xivApiIconPathToUrl(iconPath) : "",
+        iconPath: String(iconPath || ""),
         fast: true,
         description: String(zhDescription || "该结果通过本地客户端双语映射表解析得到。"),
       };
@@ -2650,7 +3744,8 @@ function searchItemsFromMapping(keyword) {
       name: String(zhName || ""),
       englishName: String(enName || ""),
       description: String(zhDescription || ""),
-      icon: iconPath ? `https://xivapi.com/i/${iconPath}` : "",
+      icon: iconPath ? xivApiIconPathToUrl(iconPath) : "",
+      iconPath: String(iconPath || ""),
       fast: true,
     };
     results.push({

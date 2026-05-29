@@ -877,8 +877,74 @@ input {
   margin-bottom: 16px;
 }
 
+.sales-ranking-card .market-quality-row {
+  margin-bottom: 12px;
+}
+
+.sales-ranking-card .table-wrap {
+  margin-top: 14px;
+}
+
+.ranking-summary-grid {
+  margin-top: 14px;
+}
+
+.ranking-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ranking-item__icon {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(87, 54, 24, 0.12);
+  border-radius: 10px;
+  background: var(--icon-chip-bg);
+  overflow: hidden;
+}
+
+.ranking-item__icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ranking-item__icon img.is-hidden {
+  display: none;
+}
+
 .table-actions {
   min-width: min(360px, 100%);
+}
+
+.ranking-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: min(420px, 100%);
+}
+
+.ranking-actions select {
+  min-height: 42px;
+  min-width: 220px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--input-bg);
+  color: var(--ink);
+  outline: none;
+}
+
+.ranking-actions select:focus {
+  border-color: rgba(156, 72, 16, 0.42);
+  box-shadow: 0 0 0 4px var(--focus-ring);
 }
 
 .table-wrap {
@@ -893,6 +959,10 @@ input {
   width: 100%;
   border-collapse: collapse;
   min-width: 880px;
+}
+
+.ranking-table {
+  min-width: 1080px;
 }
 
 .price-table th,
@@ -975,6 +1045,44 @@ input {
   gap: 12px;
 }
 
+.recipe-profit-button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding-inline: 12px;
+}
+
+.recipe-profit-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.profit-scope-field {
+  display: grid;
+  gap: 4px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.profit-scope-field select {
+  min-height: 36px;
+  min-width: 150px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--input-bg);
+  color: var(--ink);
+  font: inherit;
+  outline: none;
+}
+
+.profit-scope-field select:focus {
+  border-color: rgba(156, 72, 16, 0.42);
+  box-shadow: 0 0 0 4px var(--focus-ring);
+}
+
 .recipe-card__title,
 .gather-card__title {
   display: flex;
@@ -1029,6 +1137,61 @@ input {
 .ingredient__amount {
   color: var(--accent-strong);
   font-weight: 800;
+}
+
+.recipe-profit-panel {
+  margin-top: 14px;
+}
+
+.recipe-profit-result {
+  display: grid;
+  gap: 14px;
+}
+
+.profit-material-list {
+  display: grid;
+  gap: 8px;
+}
+
+.profit-material {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.3fr) minmax(130px, 0.9fr) 80px minmax(130px, 0.9fr);
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--ingredient-bg);
+}
+
+.profit-material--head {
+  background: var(--table-head-bg);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.profit-material__name {
+  font-weight: 700;
+}
+
+.profit-material__price,
+.profit-material__amount,
+.profit-material__subtotal {
+  font-weight: 800;
+}
+
+.profit-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.metric-card.is-profit .metric-card__value {
+  color: var(--success);
+}
+
+.metric-card.is-loss .metric-card__value {
+  color: var(--danger);
 }
 
 .source-card__title {
@@ -1180,5 +1343,39 @@ input {
 
   .table-actions {
     min-width: 0;
+  }
+
+  .ranking-actions {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+
+  .ranking-actions select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .recipe-card__header {
+    flex-direction: column;
+  }
+
+  .recipe-profit-actions {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .profit-scope-field select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .recipe-profit-button {
+    width: 100%;
+  }
+
+  .profit-material,
+  .profit-summary-grid {
+    grid-template-columns: 1fr;
   }
 }

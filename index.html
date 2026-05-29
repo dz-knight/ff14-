@@ -32,7 +32,7 @@
             </div>
             <div class="stat-pill">
               <span class="stat-pill__label">构建</span>
-              <span class="stat-pill__value">v1.0.5</span>
+              <span class="stat-pill__value">v1.0.6</span>
             </div>
           </div>
         </div>
@@ -127,6 +127,49 @@
         </div>
       </section>
 
+      <section class="card sales-ranking-card" id="sales-ranking-panel">
+        <div class="card__header">
+          <div>
+            <p class="card__eyebrow">销售排行</p>
+            <h2>当前区服销售排行</h2>
+          </div>
+          <div class="ranking-actions">
+            <select id="sales-ranking-scope" aria-label="排行区服范围">
+              <option value="region:中国">中国全区</option>
+            </select>
+            <button id="load-sales-ranking" class="link-button" type="button">加载排行</button>
+          </div>
+        </div>
+        <div class="market-quality-row" id="sales-ranking-tabs" role="group" aria-label="销售排行类型">
+          <button type="button" class="region-filter is-active" data-sales-ranking-mode="price">价格排行</button>
+          <button type="button" class="region-filter" data-sales-ranking-mode="quantity">销量排行</button>
+        </div>
+        <div id="sales-ranking-status">
+          <div class="notice notice--soft">选择区服后点击“加载排行”，默认展示前 30 名。</div>
+        </div>
+        <div id="sales-ranking-summary"></div>
+        <div class="table-wrap">
+          <table class="price-table ranking-table">
+            <thead>
+              <tr>
+                <th>排名</th>
+                <th>物品</th>
+                <th>区服</th>
+                <th>当前价格</th>
+                <th>日销量</th>
+                <th>均价</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody id="sales-ranking-table-body">
+              <tr>
+                <td colspan="7" class="table-empty">点击“加载排行”后显示前 30 名</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="detail-grid">
         <article class="card" id="obtain-panel">
           <div class="card__header">
@@ -171,6 +214,7 @@
     </button>
   </template>
 
-  <script src="./app.js?v=20260525-v108"></script>
+  <script src="./market-calculations.js?v=20260529-v3"></script>
+  <script src="./app.js?v=20260529-v113"></script>
 </body>
 </html>
