@@ -3596,7 +3596,7 @@ async function openWikiSearch(query) {
   window.open(target, "_blank", "noopener,noreferrer");
 }
 
-const ITEM_MAPPING_URL = "./data/item_mapping.min.json?v=20260528-v2";
+const ITEM_MAPPING_URL = "./data/item_mapping.min.json?v=20260609-v1";
 
 async function loadItemMapping() {
   try {

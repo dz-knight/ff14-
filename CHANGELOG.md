@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.7 - 2026-06-09
+
+- Updated the built-in bilingual item mapping with 45 newly tradable CN items from the latest local CN client data and XIVAPI
+- Added missing search coverage for Auxesia and Cosmic Exploration items, including `奥克塞西亚能源包` / `Auxesia Drone Module`
+- Bumped the item mapping cache version so desktop and web clients refresh the updated data file
+
 ## v1.0.6 - 2026-05-29
 
 - Added current-scope sales rankings for CN region, data center, and world scopes with top-30 price and quantity views
