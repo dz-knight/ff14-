@@ -1,5 +1,21 @@
 # FF14 物价百科桌面端 v1.0.6 更新说明
 
+## 2026-06-09 图片修复
+
+新增物品图标不显示的原因是旧图标镜像站尚未同步 7.5x 的部分图标，例如 `023000/023624.png` 会返回 404。
+
+- 前端图标地址优先使用 XIVAPI v2 asset 接口，避开旧镜像未同步导致的 404
+- 桌面端本地图标代理增加同样的 XIVAPI v2 兜底，并继续写入本地图标缓存
+- 本地静态调试服务器的 `/__icon` 代理同步增加兜底
+- 更新 `index.html` 中的 `app.js` 缓存版本，确保客户端加载修复后的脚本
+
+## 验证
+
+- `node --check app.js`
+- `node --check tools/serve-static-utf8.js`
+- `dotnet build desktop/FF14MarketDesktop/FF14MarketDesktop.csproj`
+- 本地 `/__icon?path=023000%2F023624.png` 返回 `200 image/png`
+
 ## 2026-06-09
 
 本次更新刷新了内置双语物品映射表，补齐 45 个当前可交易但旧映射表缺失的物品。

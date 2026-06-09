@@ -2498,6 +2498,7 @@ function getRankingIconFallbackUrls(row, primaryUrl) {
     }
   };
   if (normalizedPath) {
+    addUrl(iconPathToXivApiAssetUrl(normalizedPath));
     addUrl(`https://cafemaker.wakingsands.com/i/${normalizedPath}`);
     addUrl(`https://xivapi.com/i/${normalizedPath}`);
   }
@@ -3435,12 +3436,12 @@ function toIconUrl(iconPath) {
   if (proxyUrl) {
     return proxyUrl;
   }
-  if (/^https?:\/\//.test(iconPath)) {
-    return iconPath;
-  }
   const normalized = normalizeIconPath(iconPath);
   if (normalized) {
-    return `https://cafemaker.wakingsands.com/i/${normalized}`;
+    return iconPathToXivApiAssetUrl(normalized);
+  }
+  if (/^https?:\/\//.test(iconPath)) {
+    return iconPath;
   }
   return `https://cafemaker.wakingsands.com${iconPath}`;
 }
@@ -3456,7 +3457,16 @@ function xivApiIconPathToUrl(path) {
   if (!normalized) {
     return "";
   }
-  return `https://cafemaker.wakingsands.com/i/${normalized}`;
+  return iconPathToXivApiAssetUrl(normalized);
+}
+
+function iconPathToXivApiAssetUrl(iconPath) {
+  const normalized = normalizeIconPath(iconPath);
+  if (!normalized) {
+    return "";
+  }
+  const texPath = normalized.replace(/\.png$/i, ".tex");
+  return `https://v2.xivapi.com/api/asset?path=${encodeURIComponent(`ui/icon/${texPath}`)}&format=png`;
 }
 
 function iconPathToProxyUrl(iconPath) {

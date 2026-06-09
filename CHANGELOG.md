@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.8 - 2026-06-09
+
+- Fixed newly added item icons by using the XIVAPI v2 asset endpoint when the legacy icon mirrors have not synced the image yet
+- Added the same XIVAPI v2 fallback to the desktop and local static icon proxy
+- Bumped the frontend script cache version so clients load the icon fallback fix
+
 ## v1.0.7 - 2026-06-09
 
 - Updated the built-in bilingual item mapping with 45 newly tradable CN items from the latest local CN client data and XIVAPI

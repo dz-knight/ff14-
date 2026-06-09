@@ -78,6 +78,27 @@ async function fetchIcon(iconPath) {
       // Try the next source.
     }
   }
+
+  try {
+    const texPath = iconPath.replace(/\.png$/i, ".tex");
+    const assetUrl = `https://v2.xivapi.com/api/asset?path=${encodeURIComponent(`ui/icon/${texPath}`)}&format=png`;
+    const response = await fetch(assetUrl);
+    const contentType = response.headers.get("content-type") || "";
+    if (response.ok && contentType.includes("image/")) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length) {
+        const cachePath = path.resolve(iconCacheRoot, iconPath);
+        if (cachePath.startsWith(iconCacheRoot)) {
+          await fs.mkdir(path.dirname(cachePath), { recursive: true });
+          await fs.writeFile(cachePath, bytes);
+        }
+        return bytes;
+      }
+    }
+  } catch {
+    // Keep the existing not-found behavior if every source fails.
+  }
+
   return null;
 }
 

@@ -230,6 +230,29 @@ internal sealed class LocalStaticServer : IDisposable
             }
         }
 
+        try
+        {
+            var assetPath = $"ui/icon/{Path.ChangeExtension(iconPath.Replace('\\', '/'), ".tex")}";
+            var assetUrl = $"https://v2.xivapi.com/api/asset?path={Uri.EscapeDataString(assetPath)}&format=png";
+            using var response = await IconHttpClient.GetAsync(assetUrl);
+            var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
+            if (response.IsSuccessStatusCode && mediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            {
+                var bytes = await response.Content.ReadAsByteArrayAsync();
+                if (bytes.Length > 0)
+                {
+                    var cachePath = GetIconCachePath(iconPath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(cachePath)!);
+                    await File.WriteAllBytesAsync(cachePath, bytes);
+                    return bytes;
+                }
+            }
+        }
+        catch
+        {
+            // Keep the existing not-found behavior if every source fails.
+        }
+
         return null;
     }
 
