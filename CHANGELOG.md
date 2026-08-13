@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.0.9 - 2026-08-13
+
+- Added fast local-first fuzzy suggestions for Chinese and English item names, including `秘银` -> `秘银矿`
+- Stopped fuzzy, quest-name, and duplicate-name searches from auto-opening a result; users now choose an entry with its entity ID visible
+- Isolated item and quest failures with independent fallbacks and capped CafeMaker search requests at four seconds
+- Prevented stale search and detail requests from replacing newer input or selections
+- Added deterministic search-ranking tests against the real bilingual item mapping
+
 ## v1.0.8 - 2026-06-09
 
 - Fixed newly added item icons by using the XIVAPI v2 asset endpoint when the legacy icon mirrors have not synced the image yet

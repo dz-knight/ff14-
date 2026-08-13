@@ -16,6 +16,8 @@ const SALES_RANKING_BATCH_TIMEOUT_MS = 20000;
 const SALES_RANKING_TAX_RATE = 0.05;
 const SALES_RANKING_CACHE_TTL_MS = 2 * 60 * 1000;
 const SALES_RANKING_STORAGE_TTL_MS = 5 * 60 * 1000;
+const SEARCH_RESULT_LIMIT = 50;
+const SEARCH_REMOTE_TIMEOUT_MS = 4000;
 const ICON_PROXY_ENDPOINT = "/__icon";
 const LOCAL_ICON_PROXY_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const FETCH_LIMITS = {
@@ -38,6 +40,7 @@ const state = {
   worldMap: new Map(),
   selectedRegion: "全部",
   currentEntity: null,
+  entityLoadToken: 0,
   currentWorldRows: [],
   searchToken: 0,
   searchTimer: null,
@@ -309,6 +312,7 @@ async function loadFromUrl({ replace = false } = {}) {
 
 function updateRoute(type, id, name, replace = false) {
   const url = new URL(window.location.href);
+  url.searchParams.delete("q");
   url.searchParams.set("type", type);
   url.searchParams.set("id", String(id));
   if (name) {
@@ -366,6 +370,20 @@ async function loadMarketMetadata() {
   syncSalesRankingScopeOptions();
 }
 
+function updateSearchRoute(keyword, replace = false) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("q", keyword);
+  url.searchParams.delete("type");
+  url.searchParams.delete("id");
+  url.searchParams.delete("name");
+
+  if (replace) {
+    history.replaceState({}, "", url);
+  } else {
+    history.pushState({}, "", url);
+  }
+}
+
 function syncSalesRankingScopeOptions() {
   if (!dom.salesRankingScope) {
     return;
@@ -405,20 +423,23 @@ function getMarketScopeOptions() {
 
 function handleSearchInput(keyword) {
   window.clearTimeout(state.searchTimer);
+  const token = ++state.searchToken;
+  state.entityLoadToken += 1;
   if (!keyword) {
     dom.searchResults.classList.add("hidden");
     dom.searchResults.innerHTML = "";
     return;
   }
 
-  const exactAlias = resolveKnownItemAlias(keyword);
-  if (exactAlias) {
-    renderSearchResults(searchEntitiesFromKnownAlias(keyword, exactAlias));
-    return;
+  const localResults = mapItemsToSearchEntities(searchItemsFromMapping(keyword));
+  if (localResults.length) {
+    renderSearchResults(rankSearchResults(localResults, keyword));
+  } else {
+    dom.searchResults.classList.add("hidden");
+    dom.searchResults.innerHTML = "";
   }
 
   state.searchTimer = window.setTimeout(async () => {
-    const token = ++state.searchToken;
     try {
       const results = await searchEntities(keyword, { allowDeepFallback: false });
       if (token !== state.searchToken) {
@@ -439,6 +460,8 @@ async function performSearch(keyword, { replace = false } = {}) {
   dom.searchButton.disabled = true;
   dom.searchButton.textContent = "搜索中";
   setLoadingState(keyword);
+  const token = ++state.searchToken;
+  state.entityLoadToken += 1;
 
   try {
     const exactAlias = resolveKnownItemAlias(keyword);
@@ -452,11 +475,28 @@ async function performSearch(keyword, { replace = false } = {}) {
       return;
     }
 
+    const exactMatches = searchItemsFromMapping(keyword).filter((entry) =>
+      [entry.Name, entry.Name_en, entry.Name_ja]
+        .filter(Boolean)
+        .some((name) => normalizeSearchKey(name) === normalizeSearchKey(keyword))
+    );
+    if (exactMatches.length === 1) {
+      const preferred = mapItemsToSearchEntities(exactMatches)[0];
+      renderSearchResults([preferred]);
+      rememberResolvedAlias(keyword, exactMatches[0].__mappingAlias);
+      dom.searchInput.value = preferred.name;
+      saveSearchHistory(keyword);
+      await loadItemPage(preferred.id, { replace });
+      return;
+    }
+
     const questIntent = parseQuestSearchIntent(keyword);
     if (questIntent.directQuestId) {
       await loadQuestPage(questIntent.directQuestId, { replace });
       return;
     }
+
+    updateSearchRoute(keyword, replace);
 
     if (questIntent.forceQuestKeyword) {
       const forcedQuestResults = await searchQuests(questIntent.forceQuestKeyword);
@@ -473,13 +513,27 @@ async function performSearch(keyword, { replace = false } = {}) {
         renderQuestSearchNotFound(questIntent.forceQuestKeyword);
         return;
       }
-      dom.searchInput.value = mappedQuestResults[0].name;
-      saveSearchHistory(`任务:${mappedQuestResults[0].name}`);
-      await loadQuestPage(mappedQuestResults[0].id, { replace });
+      dom.searchInput.value = keyword;
+      saveSearchHistory(keyword);
+      setBootStatus(`找到 ${mappedQuestResults.length} 条任务结果，请选择准确条目`);
+      renderAmbiguousSearchResult(keyword, mappedQuestResults);
       return;
     }
 
+    const localResults = rankSearchResults(
+      mapItemsToSearchEntities(searchItemsFromMapping(keyword)),
+      keyword
+    );
+    if (localResults.length) {
+      renderSearchResults(localResults);
+      renderAmbiguousSearchResult(keyword, localResults);
+      setBootStatus(`已找到 ${localResults.length} 条本地物品结果，正在补充任务结果`);
+    }
+
     const results = await searchEntities(keyword, { allowDeepFallback: true });
+    if (token !== state.searchToken) {
+      return;
+    }
     renderSearchResults(results);
 
     if (!results.length) {
@@ -487,41 +541,10 @@ async function performSearch(keyword, { replace = false } = {}) {
       return;
     }
 
-    const preferred = pickPreferredSearchResult(results, keyword);
-    if (!preferred || !preferred.shouldAutoOpen) {
-      const wikiResolved = await tryResolveAmbiguousViaWiki(keyword);
-      if (wikiResolved) {
-        renderSearchResults([wikiResolved]);
-        dom.searchInput.value = wikiResolved.name;
-        saveSearchHistory(keyword);
-        if (wikiResolved.type === "wiki") {
-          renderAmbiguousSearchResult(keyword, [wikiResolved, ...results]);
-          setBootStatus(`已找到 Wiki 结果，请确认条目或直接打开国服 Wiki`);
-          return;
-        }
-        await loadItemPage(wikiResolved.id, { replace });
-        return;
-      }
-
-      dom.searchInput.value = keyword;
-      saveSearchHistory(keyword);
-      setBootStatus(`找到 ${results.length} 条相关结果，请点击列表中的准确条目`);
-      renderAmbiguousSearchResult(keyword, results);
-      return;
-    }
-
-    const selected = preferred.entry;
-    dom.searchInput.value = selected.name;
+    dom.searchInput.value = keyword;
     saveSearchHistory(keyword);
-
-    if (selected.type === "quest") {
-      await loadQuestPage(selected.id, { replace });
-    } else {
-      if (selected.raw?.__mappingAlias) {
-        rememberResolvedAlias(keyword, selected.raw.__mappingAlias);
-      }
-      await loadItemPage(selected.id, { replace });
-    }
+    setBootStatus(`找到 ${results.length} 条相关结果，请选择准确条目`);
+    renderAmbiguousSearchResult(keyword, results);
   } catch (error) {
     console.error(error);
     renderLoadError(error);
@@ -532,28 +555,25 @@ async function performSearch(keyword, { replace = false } = {}) {
 }
 
 async function searchEntities(keyword, { allowDeepFallback = true } = {}) {
-  const exactAlias = resolveKnownItemAlias(keyword);
-  if (exactAlias) {
-    return searchEntitiesFromKnownAlias(keyword, exactAlias);
-  }
-
   const cacheKey = `${keyword.trim().toLowerCase()}::${allowDeepFallback ? "deep" : "light"}`;
   if (state.caches.search.has(cacheKey)) {
     return state.caches.search.get(cacheKey);
   }
 
-  const promise = Promise.all([
+  const promise = Promise.allSettled([
     searchItems(keyword, { allowDeepFallback }),
     searchQuests(keyword),
-  ]).then(([items, quests]) => {
-    const mappedItems = items.map((entry) => ({
-      type: "item",
-      id: entry.ID,
-      name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
-      subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
-      icon: entry.Icon,
-      raw: entry,
-    }));
+  ]).then(([itemsResult, questsResult]) => {
+    const items = itemsResult.status === "fulfilled" ? itemsResult.value : [];
+    const quests = questsResult.status === "fulfilled" ? questsResult.value : [];
+    if (itemsResult.status === "rejected") {
+      debugLog(`[searchEntities:items-failed] keyword=${keyword} error=${itemsResult.reason?.message || itemsResult.reason}`);
+    }
+    if (questsResult.status === "rejected") {
+      debugLog(`[searchEntities:quests-failed] keyword=${keyword} error=${questsResult.reason?.message || questsResult.reason}`);
+    }
+
+    const mappedItems = mapItemsToSearchEntities(items);
 
     const mappedQuests = quests.map((entry) => ({
       type: "quest",
@@ -564,7 +584,7 @@ async function searchEntities(keyword, { allowDeepFallback = true } = {}) {
       raw: entry,
     }));
 
-    const combined = [...mappedItems, ...mappedQuests];
+    const combined = rankSearchResults([...mappedItems, ...mappedQuests], keyword);
     if (!combined.length) {
       state.caches.search.delete(cacheKey);
     }
@@ -576,7 +596,10 @@ async function searchEntities(keyword, { allowDeepFallback = true } = {}) {
 }
 
 function searchEntitiesFromKnownAlias(keyword, exactAlias) {
-  const items = buildResolvedAliasItems(keyword, exactAlias);
+  return mapItemsToSearchEntities(buildResolvedAliasItems(keyword, exactAlias));
+}
+
+function mapItemsToSearchEntities(items) {
   return items.map((entry) => ({
     type: "item",
     id: entry.ID,
@@ -585,6 +608,17 @@ function searchEntitiesFromKnownAlias(keyword, exactAlias) {
     icon: entry.Icon,
     raw: entry,
   }));
+}
+
+function rankSearchResults(results, keyword) {
+  if (window.FF14SearchRanking?.rankSearchResults) {
+    return window.FF14SearchRanking.rankSearchResults(results, keyword, SEARCH_RESULT_LIMIT);
+  }
+  return results
+    .map((entry, index) => ({ entry, index, score: scoreSearchResult(entry, normalizeSearchKey(keyword)) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .slice(0, SEARCH_RESULT_LIMIT)
+    .map((candidate) => candidate.entry);
 }
 
 function pickPreferredSearchResult(results, keyword) {
@@ -650,7 +684,7 @@ function scoreSearchResult(entry, normalizedKeyword) {
   return best;
 }
 
-async function searchItems(keyword, { allowDeepFallback = true } = {}) {
+async function searchItemsFromRemote(keyword, { allowDeepFallback = true } = {}) {
   const exactAlias = resolveKnownItemAlias(keyword);
   if (exactAlias) {
     debugLog(`[searchItems:known-alias] keyword=${keyword} itemId=${exactAlias.itemId} english=${exactAlias.englishName}`);
@@ -661,7 +695,7 @@ async function searchItems(keyword, { allowDeepFallback = true } = {}) {
   const encoded = encodeURIComponent(keyword);
   const columns = encodeURIComponent("ID,Name,Name_en,Name_ja,Icon,LevelItem,ItemUICategory.Name");
   const primaryUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=chs&limit=50&columns=${columns}`;
-  const primary = await fetchJson(primaryUrl);
+  const primary = await fetchJson(primaryUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS });
   const results = primary.Results || [];
   debugLog(`[searchItems:primary] keyword=${keyword} count=${results.length}`);
 
@@ -670,7 +704,7 @@ async function searchItems(keyword, { allowDeepFallback = true } = {}) {
   }
 
   const fallbackUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=en&limit=50&columns=${columns}`;
-  const fallback = await fetchJson(fallbackUrl);
+  const fallback = await fetchJson(fallbackUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS });
   const fallbackResults = fallback.Results || [];
   debugLog(`[searchItems:fallback-en] keyword=${keyword} count=${fallbackResults.length}`);
   if (fallbackResults.length > 0) {
@@ -749,16 +783,25 @@ async function searchQuests(keyword) {
   const encoded = encodeURIComponent(keyword);
   const columns = encodeURIComponent("ID,Name,Name_en,Name_ja,Icon,JournalGenre.Name,ClassJobLevel0");
   const primaryUrl = `${ENCYCLOPEDIA_API}/search?indexes=Quest&string=${encoded}&language=chs&limit=50&columns=${columns}`;
-  const primary = await fetchJson(primaryUrl);
-  const results = primary.Results || [];
+  const primary = await fetchJson(primaryUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS }).catch((error) => {
+    debugLog(`[searchQuests:primary-failed] keyword=${keyword} error=${error?.message || error}`);
+    return null;
+  });
+  if (!primary) {
+    return [];
+  }
+  const results = primary?.Results || [];
 
   if (results.length > 0) {
     return results;
   }
 
   const fallbackUrl = `${ENCYCLOPEDIA_API}/search?indexes=Quest&string=${encoded}&language=en&limit=50&columns=${columns}`;
-  const fallback = await fetchJson(fallbackUrl);
-  return fallback.Results || [];
+  const fallback = await fetchJson(fallbackUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS }).catch((error) => {
+    debugLog(`[searchQuests:fallback-failed] keyword=${keyword} error=${error?.message || error}`);
+    return null;
+  });
+  return fallback?.Results || [];
 }
 
 function debugLog(message) {
@@ -1058,8 +1101,12 @@ function renderLoadError(error) {
 }
 
 async function loadItemPage(itemId, { replace = false } = {}) {
+  const loadToken = ++state.entityLoadToken;
   setBootStatus(`正在载入物品 #${itemId}`);
   const item = await getItem(itemId);
+  if (loadToken !== state.entityLoadToken) {
+    return;
+  }
   updateRoute("item", item.ID, item.Name, replace);
   state.currentEntity = { type: "item", data: item };
   state.currentWorldRows = [];
@@ -1094,6 +1141,9 @@ async function loadItemPage(itemId, { replace = false } = {}) {
       return [];
     }),
   ]);
+  if (loadToken !== state.entityLoadToken) {
+    return;
+  }
 
   const directCraftRecipes = craftRecipes
     .filter(Boolean)
@@ -1121,9 +1171,16 @@ async function loadItemPage(itemId, { replace = false } = {}) {
 }
 
 async function loadQuestPage(questId, { replace = false } = {}) {
+  const loadToken = ++state.entityLoadToken;
   setBootStatus(`正在载入任务 #${questId}`);
   const quest = await getQuest(questId);
+  if (loadToken !== state.entityLoadToken) {
+    return;
+  }
   const questChain = await getQuestChainData(quest);
+  if (loadToken !== state.entityLoadToken) {
+    return;
+  }
   updateRoute("quest", quest.ID, quest.Name, replace);
   state.currentEntity = { type: "quest", data: quest };
   state.currentWorldRows = [];
@@ -3655,15 +3712,21 @@ function normalizeMappingEntry(entry) {
       itemId: Number(itemId),
       zhName: String(zhName || ""),
       enName: String(enName || ""),
+      zhKey: normalizeSearchKey(zhName),
+      enKey: normalizeSearchKey(enName),
       iconPath: String(iconPath || ""),
     };
   }
 
   if (entry && typeof entry === "object") {
+    const zhName = String(entry.ZhName ?? entry.zhName ?? "");
+    const enName = String(entry.EnName ?? entry.enName ?? "");
     return {
       itemId: Number(entry.ItemId ?? entry.itemId ?? 0),
-      zhName: String(entry.ZhName ?? entry.zhName ?? ""),
-      enName: String(entry.EnName ?? entry.enName ?? ""),
+      zhName,
+      enName,
+      zhKey: normalizeSearchKey(zhName),
+      enKey: normalizeSearchKey(enName),
       zhDescription: String(entry.ZhDescription ?? entry.zhDescription ?? ""),
       iconPath: String(entry.IconPath ?? entry.iconPath ?? ""),
     };
@@ -3736,19 +3799,14 @@ function searchItemsFromMapping(keyword) {
     return [];
   }
 
-  const exact = state.itemMappingExact?.get(normalized) || [];
-  if (exact.length) {
-    return exact.map((entry) => buildResolvedAliasItems(keyword, entry)[0]);
-  }
+  const rankedRows = window.FF14SearchRanking?.rankLocalItems
+    ? window.FF14SearchRanking.rankLocalItems(state.itemMappingEntries, keyword, SEARCH_RESULT_LIMIT)
+    : state.itemMappingEntries
+      .filter((row) => normalizeSearchKey(row.zhName).includes(normalized) || normalizeSearchKey(row.enName).includes(normalized))
+      .slice(0, SEARCH_RESULT_LIMIT);
 
-  const results = [];
-  for (const row of state.itemMappingEntries) {
+  return rankedRows.map((row) => {
     const { itemId, zhName, enName, zhDescription, iconPath } = row;
-    const zhKey = normalizeSearchKey(zhName);
-    const enKey = normalizeSearchKey(enName);
-    if (!zhKey.includes(normalized) && !enKey.includes(normalized)) {
-      continue;
-    }
     const mappingAlias = {
       itemId: Number(itemId),
       name: String(zhName || ""),
@@ -3758,7 +3816,7 @@ function searchItemsFromMapping(keyword) {
       iconPath: String(iconPath || ""),
       fast: true,
     };
-    results.push({
+    return {
       ID: Number(itemId),
       Name: String(zhName || ""),
       Name_en: String(enName || ""),
@@ -3768,67 +3826,21 @@ function searchItemsFromMapping(keyword) {
       LevelItem: 0,
       ItemUICategory: { Name: "双语映射" },
       __mappingAlias: mappingAlias,
-    });
-    if (results.length >= 50) {
-      break;
-    }
-  }
-
-  return results;
+    };
+  });
 }
 
 async function searchItems(keyword, { allowDeepFallback = true } = {}) {
-  const exactAlias = resolveKnownItemAlias(keyword);
-  if (exactAlias) {
-    debugLog(`[searchItems:mapping-exact] keyword=${keyword} itemId=${exactAlias.itemId} english=${exactAlias.englishName}`);
-    return buildResolvedAliasItems(keyword, exactAlias);
-  }
-
   const mapped = searchItemsFromMapping(keyword);
   if (mapped.length) {
     debugLog(`[searchItems:mapping-fuzzy] keyword=${keyword} count=${mapped.length}`);
     return mapped;
   }
 
-  debugLog(`[searchItems:start] keyword=${keyword}`);
-  const encoded = encodeURIComponent(keyword);
-  const columns = encodeURIComponent("ID,Name,Name_en,Name_ja,Icon,LevelItem,ItemUICategory.Name");
-  const primaryUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=chs&limit=50&columns=${columns}`;
-  const primary = await fetchJson(primaryUrl);
-  const results = primary.Results || [];
-  debugLog(`[searchItems:primary] keyword=${keyword} count=${results.length}`);
-
-  if (results.length > 0) {
-    return results;
-  }
-
-  const fallbackUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=en&limit=50&columns=${columns}`;
-  const fallback = await fetchJson(fallbackUrl);
-  const fallbackResults = fallback.Results || [];
-  debugLog(`[searchItems:fallback-en] keyword=${keyword} count=${fallbackResults.length}`);
-  if (fallbackResults.length > 0) {
-    return fallbackResults;
-  }
-
-  if (!allowDeepFallback) {
-    debugLog(`[searchItems:skip-deep-fallback] keyword=${keyword}`);
+  return searchItemsFromRemote(keyword, { allowDeepFallback }).catch((error) => {
+    debugLog(`[searchItems:remote-failed] keyword=${keyword} error=${error?.message || error}`);
     return [];
-  }
-
-  const wikiResolved = await resolveItemViaWikiFallback(keyword);
-  debugLog(`[searchItems:wiki-fallback-result] keyword=${keyword} success=${!!wikiResolved} itemId=${wikiResolved?.itemId ?? ""} english=${wikiResolved?.englishName ?? ""}`);
-  if (wikiResolved?.itemId) {
-    return buildResolvedAliasItems(keyword, {
-      itemId: wikiResolved.itemId,
-      name: wikiResolved.title || keyword,
-      englishName: wikiResolved.englishName || wikiResolved.title || keyword,
-      icon: "",
-      fast: true,
-      description: "该结果通过 Wiki -> 双语运行时缓存兜底解析得到。",
-    });
-  }
-
-  return [];
+  });
 }
 
 function resolveItemViaWikiFallback(keyword) {
@@ -3927,6 +3939,8 @@ function renderSearchResults(results) {
     meta.textContent = `${typeLabel} · ${entry.subtitle}`;
 
     node.addEventListener("click", async () => {
+      window.clearTimeout(state.searchTimer);
+      state.searchToken += 1;
       dom.searchResults.classList.add("hidden");
       dom.searchInput.value = entry.name;
       if (entry.type === "quest") {
@@ -3946,6 +3960,9 @@ function renderSearchResults(results) {
 }
 
 function renderAmbiguousSearchResult(keyword, results) {
+  state.currentEntity = null;
+  state.currentWorldRows = [];
+  state.currentCraftRecipes = new Map();
   const topResults = results.slice(0, 8);
   const itemsMarkup = topResults.map((entry) => {
     const typeLabel = entry.type === "quest" ? "任务" : entry.type === "wiki" ? "Wiki" : "物品";
@@ -3955,7 +3972,7 @@ function renderAmbiguousSearchResult(keyword, results) {
     return `
       <div class="ingredient">
         <span class="ingredient__name">${nameMarkup}</span>
-        <span class="ingredient__amount">${escapeHtml(typeLabel)}</span>
+        <span class="ingredient__amount">${escapeHtml(`${typeLabel}${entry.id ? ` #${entry.id}` : ""}`)}</span>
       </div>
     `;
   }).join("");

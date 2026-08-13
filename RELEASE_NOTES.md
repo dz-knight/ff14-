@@ -1,4 +1,33 @@
-# FF14 物价百科桌面端 v1.0.6 更新说明
+# FF14 物价百科桌面端 v1.0.9 更新说明
+
+## v1.0.9 - 2026-08-13
+
+本次更新重点优化中文模糊搜索，并降低 CafeMaker 故障对查询入口的影响。
+
+- 物品搜索优先扫描本地 17,000+ 条双语映射，输入 `秘银` 会立即显示 `秘银矿`、`秘银锭` 等候选
+- 中文、英文和同名物品都按相关度排序；同名物品显示 ID，避免误选
+- 模糊搜索不再自动跳转，任务名称搜索同样要求用户选择准确结果；直接输入任务 ID 仍可打开任务
+- 物品与任务查询独立容错，任一远程查询失败都不会拖垮另一类结果
+- CafeMaker 搜索请求增加 4 秒超时；服务不可用时优先保留本地物品候选和 Universalis 市场价格
+- 增加搜索与详情加载令牌，避免较慢的旧请求覆盖用户刚输入或刚选择的内容
+
+CafeMaker 当前返回 Cloudflare `530 / 1016`，说明其域名所配置的源站 DNS 无法解析或不可达。市场价格数据源仍是 Universalis；CafeMaker 只承担百科详情和任务等远程数据补充。
+
+## 发布信息
+
+- 标签：`v1.0.9`
+- 安装包：`FF14MarketDesktop-v1.0.9-user.zip`
+- SHA-256：`45A560B3D5A5F68C2A39516458D0DD62D5A0847FCF992EE074FEC997238CC82B`
+- 回滚：从 Releases 下载并解压上一版本，替换整个程序目录；不应只替换单个 EXE
+
+## 验证
+
+- `node --check app.js`
+- `node --check search-ranking.js`
+- `node tools/test-search-ranking.js`
+- `node tools/test-market-calculations.js`
+- `dotnet build desktop/FF14MarketDesktop/FF14MarketDesktop.csproj -c Release`
+- 桌面 WebView2 验证 `秘银` 候选、同名物品 ID、选择后详情和 Universalis 国服价格
 
 ## 2026-06-09 图片修复
 
