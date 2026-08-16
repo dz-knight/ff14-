@@ -2,12 +2,17 @@
 bin/
 obj/
 dist/
+TestResults/
 
 # IDE / user files
+.vs/
 *.user
 *.suo
 *.pdb
 *.cache
+
+# Logs
+*.log
 
 # OS files
 .DS_Store

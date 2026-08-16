@@ -250,6 +250,7 @@ internal sealed class MainForm : Form
             await _wikiResolverView.EnsureCoreWebView2Async();
 
             ConfigureWebView(_marketView, "价格百科");
+            ScopePartyFinderUserAgent(_marketView);
             ConfigureWebView(_wikiPreviewView, "Wiki 预览");
             ConfigureWebView(_wikiView, "国服 Wiki");
             ConfigureWebView(_wikiResolverView, "Wiki 解析器");
@@ -273,6 +274,28 @@ internal sealed class MainForm : Form
                 MessageBoxIcon.Error);
             Close();
         }
+    }
+
+    // xivpf API 提供方要求 User-Agent 注明项目名与联系方式；
+    // 浏览器 fetch 禁止改 UA，且联系方式不应暴露给其他站点，
+    // 因此仅对 xivpf 域的请求追加（见 ScopePartyFinderUserAgent）。
+    private const string AppUserAgentSuffix = " yjkz/ff14 (contact: 1993369000@qq.com)";
+
+    private void ScopePartyFinderUserAgent(WebView2 webView)
+    {
+        var core = webView.CoreWebView2;
+        if (core is null)
+        {
+            return;
+        }
+
+        // 此处 Settings.UserAgent 尚未修改，读取到的是系统默认 UA
+        var identifiedUa = core.Settings.UserAgent + AppUserAgentSuffix;
+        core.AddWebResourceRequestedFilter(
+            "https://xivpf.littlenightmare.top/*",
+            CoreWebView2WebResourceContext.All);
+        core.WebResourceRequested += (_, args) =>
+            args.Request.Headers.SetHeader("User-Agent", identifiedUa);
     }
 
     private void ConfigureWebView(WebView2 webView, string label)
