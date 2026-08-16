@@ -1,0 +1,456 @@
+/* 招募查询模块样式：全部类名 pf- 前缀，颜色只引用 styles.css 的主题变量。 */
+
+/* 入口按钮：hero 大标题旁的小胶囊（hero 底色恒为深色，用半透明白描边） */
+.pf-hero-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+#pf-entry-button {
+  flex: none;
+  padding: 6px 16px;
+  border: 1px solid rgba(255, 251, 244, 0.5);
+  border-radius: 999px;
+  background: rgba(255, 251, 244, 0.1);
+  color: rgba(255, 251, 244, 0.92);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+#pf-entry-button:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+@font-face {
+  font-family: "FFXIV Lodestone SSF";
+  src: url("./FFXIV_Lodestone_SSF.woff") format("woff"),
+    url("./FFXIV_Lodestone_SSF.ttf") format("truetype");
+  font-display: swap;
+  /* 只拦截游戏专用字形区段，其余字符继续走正文字体 */
+  unicode-range: U+E020-E0DB;
+}
+
+.pf-gamefont {
+  font-family: "FFXIV Lodestone SSF", "Noto Sans SC", sans-serif;
+}
+
+.pf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  padding: 4vh 3vw;
+  background: rgba(20, 14, 8, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.pf-overlay.hidden,
+.pf-detail.hidden {
+  display: none;
+}
+
+.pf-window {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(1160px, 100%);
+  height: min(92vh, 100%);
+  margin: auto;
+  overflow: hidden;
+  background: var(--surface-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+}
+
+.pf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.pf-head h2 {
+  margin: 0;
+  font-size: 1.2rem;
+  color: var(--ink);
+}
+
+.pf-head__meta {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+.pf-head__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pf-updated {
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.pf-button {
+  padding: 8px 14px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.pf-button:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.pf-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.pf-button--ghost {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+}
+
+.pf-button--ghost:hover:not(:disabled) {
+  background: var(--accent-faint);
+}
+
+.pf-button--small {
+  padding: 5px 10px;
+  font-size: 0.8rem;
+}
+
+.pf-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line);
+}
+
+.pf-filters__form {
+  display: flex;
+  flex: 1 1 300px;
+  gap: 8px;
+}
+
+.pf-filters input,
+.pf-filters select {
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.pf-filters__form input {
+  flex: 1;
+}
+
+.pf-filters input:focus,
+.pf-filters select:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-faint);
+}
+
+.pf-status {
+  padding: 8px 22px;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.pf-status.is-danger {
+  color: var(--danger);
+}
+
+.pf-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+  align-content: start;
+  padding: 16px 22px;
+}
+
+.pf-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.pf-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(73, 46, 17, 0.12);
+}
+
+.pf-card__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pf-card__name {
+  font-size: 0.98rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-card__count {
+  flex: none;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.pf-card__duty {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-card__desc {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  min-height: 2.5em;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  word-break: break-word;
+}
+
+.pf-card__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pf-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pf-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-faint);
+  color: var(--accent-strong);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.pf-badge--soft {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+}
+
+.pf-card__time {
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+
+.pf-card__time.is-urgent {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.pf-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.pf-pagination__info {
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+}
+
+.pf-detail {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  overflow-y: auto;
+  background: var(--surface-strong);
+}
+
+.pf-detail__panel {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 24px 28px 40px;
+}
+
+.pf-detail__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.pf-detail__head h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  color: var(--ink);
+}
+
+.pf-detail__sub {
+  margin: 6px 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.pf-detail__desc {
+  margin: 16px 0;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+}
+
+.pf-detail__facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px 18px;
+  margin: 0 0 6px;
+}
+
+.pf-detail__facts dt {
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+
+.pf-detail__facts dd {
+  margin: 2px 0 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.pf-detail__slots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.pf-slot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+}
+
+.pf-slot__state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.pf-slot.is-filled .pf-slot__state {
+  background: var(--accent);
+  color: #fff;
+}
+
+.pf-slot.is-free .pf-slot__state {
+  background: var(--accent-faint);
+  color: var(--accent-strong);
+}
+
+.pf-slot__jobs {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pf-slot__role {
+  margin-left: auto;
+  flex: none;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+
+.pf-detail__foot {
+  margin-top: 16px;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+@media (max-width: 720px) {
+  .pf-overlay {
+    padding: 2vh 2vw;
+  }
+
+  .pf-filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pf-list {
+    grid-template-columns: 1fr;
+    padding: 12px;
+  }
+
+  .pf-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

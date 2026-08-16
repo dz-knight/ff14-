@@ -33,6 +33,18 @@
     <Content Include="..\..\styles.css" Link="wwwroot\styles.css">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="..\..\party-finder.js" Link="wwwroot\party-finder.js">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\party-finder.css" Link="wwwroot\party-finder.css">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\FFXIV_Lodestone_SSF.woff" Link="wwwroot\FFXIV_Lodestone_SSF.woff">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\FFXIV_Lodestone_SSF.ttf" Link="wwwroot\FFXIV_Lodestone_SSF.ttf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="..\..\data\**\*.*" Link="wwwroot\data\%(RecursiveDir)%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

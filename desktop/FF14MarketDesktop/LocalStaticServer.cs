@@ -422,6 +422,8 @@ internal sealed class LocalStaticServer : IDisposable
         ".png" => "image/png",
         ".jpg" or ".jpeg" => "image/jpeg",
         ".svg" => "image/svg+xml",
+        ".woff" => "font/woff",
+        ".ttf" => "font/ttf",
         _ => "application/octet-stream",
     };
 
