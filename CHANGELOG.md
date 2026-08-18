@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.0 - 2026-08-18
+
+- Added real-time CN party finder browsing with search, data-center and category filters, pagination, refresh, and listing details
+- Corrected the Variant & Criterion filter contract to `V&C Dungeon Finder` and mapped source aliases such as `AdventuringForays`
+- Added request cancellation and generation guards so stale searches and filters cannot replace newer results
+- Added batched page loading, listing ID deduplication, partial-failure warnings, and friendly fallbacks for unknown enum values
+- Scoped the required project contact User-Agent to the party finder host in the desktop WebView2 client
+- Added deterministic tests for category contracts, aliases, detail mappings, pagination failures, deduplication, and request races
+
 ## v1.0.9 - 2026-08-13
 
 - Added fast local-first fuzzy suggestions for Chinese and English item names, including `秘银` -> `秘银矿`

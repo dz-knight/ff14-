@@ -250,6 +250,7 @@ internal sealed class MainForm : Form
             await _wikiResolverView.EnsureCoreWebView2Async();
 
             ConfigureWebView(_marketView, "价格百科");
+            ScopePartyFinderUserAgent(_marketView);
             ConfigureWebView(_wikiPreviewView, "Wiki 预览");
             ConfigureWebView(_wikiView, "国服 Wiki");
             ConfigureWebView(_wikiResolverView, "Wiki 解析器");
@@ -273,6 +274,25 @@ internal sealed class MainForm : Form
                 MessageBoxIcon.Error);
             Close();
         }
+    }
+
+    private const string PartyFinderUserAgentSuffix =
+        " dz-knight/ff14 (contact: https://github.com/dz-knight/ff14-/issues)";
+
+    private static void ScopePartyFinderUserAgent(WebView2 webView)
+    {
+        var core = webView.CoreWebView2;
+        if (core is null)
+        {
+            return;
+        }
+
+        var identifiedUserAgent = core.Settings.UserAgent + PartyFinderUserAgentSuffix;
+        core.AddWebResourceRequestedFilter(
+            "https://xivpf.littlenightmare.top/*",
+            CoreWebView2WebResourceContext.All);
+        core.WebResourceRequested += (_, args) =>
+            args.Request.Headers.SetHeader("User-Agent", identifiedUserAgent);
     }
 
     private void ConfigureWebView(WebView2 webView, string label)

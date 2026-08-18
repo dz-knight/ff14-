@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;800&family=Noto+Serif+SC:wght@700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./party-finder.css?v=20260818-v1">
 </head>
 <body>
   <div class="app-shell">
@@ -16,7 +17,10 @@
       <div class="hero__content">
         <div class="hero__copy">
           <p class="eyebrow">FFXIV Market + Wiki</p>
-          <h1>FF14 物价百科</h1>
+          <div class="pf-hero-row">
+            <h1>FF14 物价百科</h1>
+            <button id="pf-entry-button" type="button" title="查询国服招募队">查招募</button>
+          </div>
           <p class="hero__summary">
             一个用 <span>HTML + JavaScript</span> 重做的本地百科前端。
             现在只保留中国国服数据，支持物品与任务搜索，并且每个结果都能跳转到独立详情页。
@@ -32,7 +36,7 @@
             </div>
             <div class="stat-pill">
               <span class="stat-pill__label">构建</span>
-              <span class="stat-pill__value">v1.0.9</span>
+              <span class="stat-pill__value">v1.1.0</span>
             </div>
           </div>
         </div>
@@ -204,6 +208,8 @@
     </main>
   </div>
 
+  <section id="pf-view" class="pf-overlay hidden" aria-hidden="true"></section>
+
   <template id="result-item-template">
     <button type="button" class="result-item">
       <div class="result-item__icon"></div>
@@ -216,6 +222,7 @@
 
   <script src="./market-calculations.js?v=20260529-v3"></script>
   <script src="./search-ranking.js?v=20260813-v1"></script>
+  <script src="./party-finder.js?v=20260818-v1"></script>
   <script src="./app.js?v=20260813-v115"></script>
 </body>
 </html>

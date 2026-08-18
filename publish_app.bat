@@ -7,7 +7,7 @@ set "PROJECT=E:\study\ff14\desktop\FF14MarketDesktop\FF14MarketDesktop.csproj"
 set "OUTDIR=E:\study\ff14\dist\FF14MarketDesktop"
 set "README_TEMPLATE=E:\study\ff14\dist_user_readme_template.txt"
 set "README_OUTPUT=E:\study\ff14\dist\FF14MarketDesktop\README.txt"
-set "ZIP_OUTPUT=E:\study\ff14\dist\FF14MarketDesktop-v1.0.9-user.zip"
+set "ZIP_OUTPUT=E:\study\ff14\dist\FF14MarketDesktop-v1.1.0-user.zip"
 
 taskkill /IM FF14MarketDesktop.exe /F >nul 2>nul
 
