@@ -53,7 +53,7 @@ for (var index = 0; index < zhSheet.Count; index++)
 
     var zhDescription = row.ReadStringColumn(8).ToString().Trim();
 
-    var iconId = Convert.ToUInt16(row.ReadColumn(10));
+    var iconId = Convert.ToUInt32(row.ReadColumn(10));
     var iconGroup = iconId / 1000;
     var iconPath = $"{iconGroup:000000}/{iconId:000000}.png";
     localRows.Add(new LocalItem(row.RowId, zhName, zhDescription, iconPath));
@@ -121,19 +121,45 @@ for (var i = 0; i < localRows.Count; i += BatchSize)
     Console.WriteLine($"Processed {Math.Min(i + BatchSize, localRows.Count)}/{localRows.Count}");
 }
 
-Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-await using var stream = File.Create(outputPath);
-await JsonSerializer.SerializeAsync(stream, new MappingFile(
-    1,
-    DateTimeOffset.Now,
-    "ff14-cn-client + xivapi-en",
-    merged.OrderBy(entry => entry.ItemId).ToArray()
-), new JsonSerializerOptions
+var fullOutputPath = Path.GetFullPath(outputPath);
+var outputDirectory = Path.GetDirectoryName(fullOutputPath)
+    ?? throw new InvalidOperationException("Output path must include a valid directory.");
+Directory.CreateDirectory(outputDirectory);
+var temporaryOutputPath = Path.Combine(
+    outputDirectory,
+    $".{Path.GetFileName(fullOutputPath)}.{Guid.NewGuid():N}.tmp");
+try
 {
-    WriteIndented = false
-});
+    await using (var stream = new FileStream(
+        temporaryOutputPath,
+        FileMode.CreateNew,
+        FileAccess.Write,
+        FileShare.None,
+        64 * 1024,
+        FileOptions.Asynchronous | FileOptions.WriteThrough))
+    {
+        await JsonSerializer.SerializeAsync(stream, new MappingFile(
+            1,
+            DateTimeOffset.Now,
+            "ff14-cn-client + xivapi-en",
+            merged.OrderBy(entry => entry.ItemId).ToArray()
+        ), new JsonSerializerOptions
+        {
+            WriteIndented = false
+        });
+        await stream.FlushAsync();
+    }
+    File.Move(temporaryOutputPath, fullOutputPath, true);
+}
+finally
+{
+    if (File.Exists(temporaryOutputPath))
+    {
+        File.Delete(temporaryOutputPath);
+    }
+}
 
-Console.WriteLine($"Wrote {merged.Count} tradable entries to {outputPath}");
+Console.WriteLine($"Wrote {merged.Count} tradable entries to {fullOutputPath}");
 return 0;
 
 static string NormalizeIconPath(string path)

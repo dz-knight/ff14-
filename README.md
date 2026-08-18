@@ -22,14 +22,23 @@
 
 ## 最新更新
 
-2026-08-18
+2026-08-19
 
 - 新增“查招募”入口，实时读取国服招募列表，支持中文搜索、大区与分类筛选、分页、刷新和详情查看
 - 招募详情补齐目的、条件、战利品规则、类型、职业槽位和剩余时间等中文显示
 - 修正特殊迷宫分类参数为 `V&C Dungeon Finder`，并兼容 `FieldOperations` / `AdventuringForays` 等返回别名
 - 分页请求按批次并发读取并按招募 ID 去重；部分页面失败时会明确提示，不会把残缺数据显示为完整结果
 - 快速连续切换搜索或筛选条件时会取消旧请求，避免旧结果覆盖当前选择
+- 招募第一页返回后立即显示，其余页后台补充；刷新失败保留上次结果，并恢复当前页码、滚动位置和键盘焦点
+- 限制异常分页数量，避免错误或恶意响应触发无限后台请求
+- 中文 Wiki 兜底解析增加浏览器、WebView 导航和桌面服务三层超时，单次故障不会再锁死后续搜索
+- 桌面本地服务器限制路径、方法、请求体、并发和日志大小，并移除不必要的跨域授权
+- 后台解析改用独立隐藏 WebView，不再改变用户正在浏览的 Wiki 页面；主题和搜索历史也不再在启动时被清空
 - 桌面 WebView2 仅对招募源站增加项目联系 User-Agent，市场和百科请求保持原有行为
+- 修复物品详情加载时引用失效变量的问题，并清理会覆盖 HQ / 非 HQ 逻辑的重复市场函数
+- 招募接口同时兼容 `data` / `listings` 返回字段和空分页；销售排行、自动刷新与快速切换区服均有竞态和失败保留测试
+- CafeMaker 失败时桌面版仍会尝试 Wiki 兜底；解析器跳转、Wiki 结果和 Universalis 结果只接受预期 HTTPS 主机
+- 图标代理按流限制为 5 MB，本地服务器只提供打包所需公开资源，发布脚本成功构建和压缩后才替换旧产物
 
 2026-08-13
 
@@ -88,6 +97,20 @@ publish_app.bat
 ```
 
 已打包版本可从 [GitHub Releases](https://github.com/dz-knight/ff14-/releases) 下载。
+
+## 本地验证
+
+```powershell
+node --check app.js
+node --check party-finder.js
+node tools/test-app-regressions.js
+node tools/test-static-server.js
+node tools/test-party-finder.js
+node tools/test-search-ranking.js
+node tools/test-market-calculations.js
+dotnet run --project tools/FF14MarketDesktop.Tests/FF14MarketDesktop.Tests.csproj -c Release
+dotnet build desktop/FF14MarketDesktop/FF14MarketDesktop.csproj -c Release
+```
 
 ## 项目结构
 

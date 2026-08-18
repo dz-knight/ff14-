@@ -9,7 +9,10 @@ namespace FF14MarketDesktop;
 internal sealed class MainForm : Form
 {
     private const string WikiBaseUrl = "https://ff14.huijiwiki.com";
+    private const string WikiHost = "ff14.huijiwiki.com";
+    private const string UniversalisHost = "universalis.app";
     private const string DefaultWikiPage = "https://ff14.huijiwiki.com/wiki/任务:晓月之终途";
+    private static readonly TimeSpan NavigationTimeout = TimeSpan.FromSeconds(15);
 
     private readonly TabControl _tabs;
     private readonly SplitContainer _marketSplit;
@@ -27,13 +30,13 @@ internal sealed class MainForm : Form
     private readonly ToolStripLabel _previewTitleLabel;
     private readonly SemaphoreSlim _resolverGate = new(1, 1);
     private readonly TaskCompletionSource<bool> _resolverReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly CancellationTokenSource _lifetimeCancellation = new();
 
     private LocalStaticServer? _server;
-    private readonly string _resolverLogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "FF14MarketDesktop",
-        "resolver.log");
-    private static readonly HttpClient ResolverHttp = new();
+    private static readonly HttpClient ResolverHttp = new()
+    {
+        Timeout = TimeSpan.FromSeconds(15),
+    };
 
     public MainForm()
     {
@@ -255,7 +258,6 @@ internal sealed class MainForm : Form
             ConfigureWebView(_wikiView, "国服 Wiki");
             ConfigureWebView(_wikiResolverView, "Wiki 解析器");
 
-            await _marketView.CoreWebView2.Profile.ClearBrowsingDataAsync();
             _marketView.Source = new Uri(_server.BaseUri, "index.html");
             _wikiView.Source = new Uri(DefaultWikiPage);
 
@@ -319,13 +321,18 @@ internal sealed class MainForm : Form
         };
     }
 
-    private async Task<string> ResolveItemRequestJsonAsync(string query)
+    private async Task<string> ResolveItemRequestJsonAsync(string query, CancellationToken cancellationToken)
     {
+        var gateAcquired = false;
         try
         {
-            await _resolverGate.WaitAsync();
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                _lifetimeCancellation.Token);
+            await _resolverGate.WaitAsync(linkedCancellation.Token);
+            gateAcquired = true;
             LogResolver($"[request] query={query}");
-            var result = await ResolveItemViaWikiOnUiThreadAsync(query);
+            var result = await ResolveItemViaWikiOnUiThreadAsync(query, linkedCancellation.Token);
             LogResolver($"[result] query={query} itemId={result.ItemId} title={result.Title} english={result.EnglishName} url={result.Url}");
             return JsonSerializer.Serialize(new
             {
@@ -335,6 +342,11 @@ internal sealed class MainForm : Form
                 englishName = result.EnglishName,
                 url = result.Url
             });
+        }
+        catch (OperationCanceledException)
+        {
+            LogResolver($"[cancelled] query={query}");
+            throw;
         }
         catch (Exception ex)
         {
@@ -347,37 +359,59 @@ internal sealed class MainForm : Form
         }
         finally
         {
-            _resolverGate.Release();
+            if (gateAcquired)
+            {
+                _resolverGate.Release();
+            }
         }
     }
 
-    private Task<WikiResolveResult> ResolveItemViaWikiOnUiThreadAsync(string query)
+    private async Task<WikiResolveResult> ResolveItemViaWikiOnUiThreadAsync(
+        string query,
+        CancellationToken cancellationToken)
     {
         if (!InvokeRequired)
         {
-            return ResolveItemViaWikiAsync(query);
+            return await ResolveItemViaWikiAsync(query, cancellationToken);
         }
 
         var tcs = new TaskCompletionSource<WikiResolveResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
+        if (IsDisposed || Disposing)
+        {
+            throw new ObjectDisposedException(nameof(MainForm));
+        }
+
         BeginInvoke(new Action(async () =>
         {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                tcs.TrySetCanceled(cancellationToken);
+                return;
+            }
             try
             {
-                var result = await ResolveItemViaWikiAsync(query);
+                var result = await ResolveItemViaWikiAsync(query, cancellationToken);
                 tcs.TrySetResult(result);
+            }
+            catch (OperationCanceledException)
+            {
+                tcs.TrySetCanceled(cancellationToken);
             }
             catch (Exception ex)
             {
                 tcs.TrySetException(ex);
             }
         }));
-        return tcs.Task;
+        return await tcs.Task;
     }
 
-    private async Task<WikiResolveResult> ResolveItemViaWikiAsync(string query)
+    private async Task<WikiResolveResult> ResolveItemViaWikiAsync(
+        string query,
+        CancellationToken cancellationToken)
     {
-        await _resolverReady.Task;
-        var resolverWikiView = _wikiView;
+        await _resolverReady.Task.WaitAsync(cancellationToken);
+        var resolverWikiView = _wikiResolverView;
 
         if (string.IsNullOrWhiteSpace(query))
         {
@@ -385,7 +419,7 @@ internal sealed class MainForm : Form
         }
 
         var searchUrl = $"{WikiBaseUrl}/index.php?search={Uri.EscapeDataString(query)}";
-        await NavigateAndWaitAsync(resolverWikiView, new Uri(searchUrl));
+        await NavigateAndWaitAsync(resolverWikiView, new Uri(searchUrl), cancellationToken);
 
         var firstLinkScript = """
 (() => {
@@ -400,16 +434,19 @@ internal sealed class MainForm : Form
 })();
 """;
 
-        var linkResult = await resolverWikiView.CoreWebView2.ExecuteScriptAsync(firstLinkScript);
+        var linkResult = await resolverWikiView.CoreWebView2
+            .ExecuteScriptAsync(firstLinkScript)
+            .WaitAsync(cancellationToken);
         var pageUrl = JsonSerializer.Deserialize<string>(linkResult) ?? string.Empty;
         LogResolver($"[wiki-search] query={query} pageUrl={pageUrl}");
-        if (string.IsNullOrWhiteSpace(pageUrl))
+        if (!TryCreateTrustedHttpsUri(pageUrl, WikiHost, out var trustedPageUri))
         {
           return new WikiResolveResult(null, null, null, null);
         }
+        pageUrl = trustedPageUri.AbsoluteUri;
 
-        var parsed = await LoadAndExtractWikiPayloadAsync(resolverWikiView, pageUrl);
-        var effectiveUrl = parsed?.Url ?? pageUrl;
+        var parsed = await LoadAndExtractWikiPayloadAsync(resolverWikiView, pageUrl, cancellationToken);
+        var effectiveUrl = GetTrustedHttpsUrl(parsed?.Url, WikiHost) ?? pageUrl;
         var title = CleanWikiTitle(parsed?.Title);
         if (string.IsNullOrWhiteSpace(title))
         {
@@ -427,9 +464,9 @@ internal sealed class MainForm : Form
         if (shouldRetryOnRootPage)
         {
             LogResolver($"[wiki-page-retry-root] from={effectiveUrl} root={rootPageUrl}");
-            var rootParsed = await LoadAndExtractWikiPayloadAsync(resolverWikiView, rootPageUrl!);
+            var rootParsed = await LoadAndExtractWikiPayloadAsync(resolverWikiView, rootPageUrl!, cancellationToken);
             parsed = MergeWikiPayload(parsed, rootParsed);
-            effectiveUrl = parsed?.Url ?? rootPageUrl!;
+            effectiveUrl = GetTrustedHttpsUrl(parsed?.Url, WikiHost) ?? rootPageUrl!;
             title ??= ExtractTitleFromWikiUrl(rootPageUrl);
         }
 
@@ -461,7 +498,7 @@ internal sealed class MainForm : Form
             return new WikiResolveResult(null, title, null, effectiveUrl);
         }
 
-        var englishResolvedItemId = await ResolveItemIdByEnglishNameAsync(englishName);
+        var englishResolvedItemId = await ResolveItemIdByEnglishNameAsync(englishName, cancellationToken);
         LogResolver($"[xivapi-english-search] english={englishName} itemId={englishResolvedItemId}");
         if (englishResolvedItemId.HasValue)
         {
@@ -472,7 +509,7 @@ internal sealed class MainForm : Form
                 effectiveUrl);
         }
 
-        var universalis = await ResolveUniversalisItemByEnglishNameAsync(englishName);
+        var universalis = await ResolveUniversalisItemByEnglishNameAsync(englishName, cancellationToken);
         return new WikiResolveResult(
             universalis.ItemId,
             title,
@@ -480,9 +517,16 @@ internal sealed class MainForm : Form
             universalis.Url ?? effectiveUrl);
     }
 
-    private async Task<WikiResolvePayload?> LoadAndExtractWikiPayloadAsync(WebView2 view, string pageUrl)
+    private async Task<WikiResolvePayload?> LoadAndExtractWikiPayloadAsync(
+        WebView2 view,
+        string pageUrl,
+        CancellationToken cancellationToken)
     {
-        await NavigateAndWaitAsync(view, new Uri(pageUrl));
+        if (!TryCreateTrustedHttpsUri(pageUrl, WikiHost, out var trustedPageUri))
+        {
+            return null;
+        }
+        await NavigateAndWaitAsync(view, trustedPageUri, cancellationToken);
 
         var extractScript = """
 (() => {
@@ -641,7 +685,10 @@ internal sealed class MainForm : Form
         WikiResolvePayload? parsed = null;
         for (var attempt = 0; attempt < 30; attempt++)
         {
-            var extractResult = await view.CoreWebView2.ExecuteScriptAsync(extractScript);
+            cancellationToken.ThrowIfCancellationRequested();
+            var extractResult = await view.CoreWebView2
+                .ExecuteScriptAsync(extractScript)
+                .WaitAsync(cancellationToken);
             var payload = NormalizeScriptJson(extractResult);
             parsed = JsonSerializer.Deserialize<WikiResolvePayload>(payload);
             if (!string.IsNullOrWhiteSpace(parsed?.Title) ||
@@ -653,7 +700,7 @@ internal sealed class MainForm : Form
                 break;
             }
 
-            await Task.Delay(300);
+            await Task.Delay(300, cancellationToken);
         }
 
         var needsApiFallback =
@@ -664,14 +711,16 @@ internal sealed class MainForm : Form
 
         if (needsApiFallback)
         {
-            var apiParsed = await ExtractWikiApiPayloadAsync(view);
+            var apiParsed = await ExtractWikiApiPayloadAsync(view, cancellationToken);
             parsed = MergeWikiPayload(parsed, apiParsed);
         }
 
         return parsed;
     }
 
-    private async Task<WikiResolvePayload?> ExtractWikiApiPayloadAsync(WebView2 view)
+    private async Task<WikiResolvePayload?> ExtractWikiApiPayloadAsync(
+        WebView2 view,
+        CancellationToken cancellationToken)
     {
         var apiScript = """
 (() => new Promise(async (resolve) => {
@@ -844,7 +893,9 @@ internal sealed class MainForm : Form
 }))();
 """;
 
-        var apiResult = await view.CoreWebView2.ExecuteScriptAsync(apiScript);
+        var apiResult = await view.CoreWebView2
+            .ExecuteScriptAsync(apiScript)
+            .WaitAsync(cancellationToken);
         var payload = NormalizeScriptJson(apiResult);
         var parsed = JsonSerializer.Deserialize<WikiResolvePayload>(payload);
         LogResolver($"[wiki-page-api] title={parsed?.Title} english={parsed?.EnglishName} candidates={string.Join(" | ", parsed?.EnglishCandidates ?? Array.Empty<string>())} cargo={parsed?.CargoDebug} universalisUrl={parsed?.UniversalisUrl} directItemId={parsed?.DirectItemId} languagePanelTextLength={parsed?.LanguagePanelTextLength}");
@@ -992,10 +1043,15 @@ internal sealed class MainForm : Form
             .Trim();
     }
 
-    private async Task<UniversalisResolveResult> ResolveUniversalisItemByEnglishNameAsync(string englishName)
+    private async Task<UniversalisResolveResult> ResolveUniversalisItemByEnglishNameAsync(
+        string englishName,
+        CancellationToken cancellationToken)
     {
         LogResolver($"[universalis-search-start] english={englishName}");
-        await NavigateAndWaitAsync(_wikiResolverView, new Uri("https://universalis.app/items"));
+        await NavigateAndWaitAsync(
+            _wikiResolverView,
+            new Uri("https://universalis.app/items"),
+            cancellationToken);
         var escaped = JsonSerializer.Serialize(englishName);
         var script =
             "(() => new Promise(async (resolve) => {" +
@@ -1027,37 +1083,39 @@ internal sealed class MainForm : Form
             "resolve(JSON.stringify({ text: '', href: '' }));" +
             "}))();";
 
-        var result = await _wikiResolverView.CoreWebView2.ExecuteScriptAsync(script);
+        var result = await _wikiResolverView.CoreWebView2
+            .ExecuteScriptAsync(script)
+            .WaitAsync(cancellationToken);
         var payload = JsonSerializer.Deserialize<string>(result) ?? "{}";
         var parsed = JsonSerializer.Deserialize<UniversalisResolvePayload>(payload);
         LogResolver($"[universalis-search-result] english={englishName} href={parsed?.Href} text={parsed?.Text}");
-        if (parsed?.Href is null)
+        if (!TryCreateTrustedHttpsUri(parsed?.Href, UniversalisHost, out var trustedMarketUri))
         {
             return new UniversalisResolveResult(null, null);
         }
 
-        var match = Regex.Match(parsed.Href, @"/market/(\d+)");
-        return match.Success
-            ? new UniversalisResolveResult(int.Parse(match.Groups[1].Value), parsed.Href)
-            : new UniversalisResolveResult(null, parsed.Href);
+        var match = Regex.Match(trustedMarketUri.AbsolutePath, @"^/market/(\d+)(?:/|$)");
+        return match.Success && int.TryParse(match.Groups[1].Value, out var itemId) && itemId > 0
+            ? new UniversalisResolveResult(itemId, trustedMarketUri.AbsoluteUri)
+            : new UniversalisResolveResult(null, trustedMarketUri.AbsoluteUri);
     }
 
-    private static UniversalisResolveResult ParseUniversalisMarketId(string? url)
+    internal static UniversalisResolveResult ParseUniversalisMarketId(string? url)
     {
-        if (string.IsNullOrWhiteSpace(url))
+        if (!TryCreateTrustedHttpsUri(url, UniversalisHost, out var trustedMarketUri))
         {
             return new UniversalisResolveResult(null, null);
         }
 
-        var match = Regex.Match(url, @"/market/(\d+)");
-        return match.Success
-            ? new UniversalisResolveResult(int.Parse(match.Groups[1].Value), url)
-            : new UniversalisResolveResult(null, url);
+        var match = Regex.Match(trustedMarketUri.AbsolutePath, @"^/market/(\d+)(?:/|$)");
+        return match.Success && int.TryParse(match.Groups[1].Value, out var itemId) && itemId > 0
+            ? new UniversalisResolveResult(itemId, trustedMarketUri.AbsoluteUri)
+            : new UniversalisResolveResult(null, trustedMarketUri.AbsoluteUri);
     }
 
-    private static int? ParseDirectItemId(string? value)
+    internal static int? ParseDirectItemId(string? value)
     {
-        if (int.TryParse(value, out var id))
+        if (int.TryParse(value, out var id) && id > 0)
         {
             return id;
         }
@@ -1065,24 +1123,30 @@ internal sealed class MainForm : Form
         return null;
     }
 
-    private async Task<int?> ResolveItemIdByEnglishNameAsync(string englishName)
+    private async Task<int?> ResolveItemIdByEnglishNameAsync(
+        string englishName,
+        CancellationToken cancellationToken)
     {
         try
         {
             var query = Uri.EscapeDataString($"Name~\"{englishName}\"");
             var url = $"https://v2.xivapi.com/api/search?sheets=Item&fields=Name&query={query}&limit=1";
-            var json = await ResolverHttp.GetStringAsync(url);
+            var json = await ResolverHttp.GetStringAsync(url, cancellationToken);
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("results", out var results) &&
                 results.ValueKind == JsonValueKind.Array &&
                 results.GetArrayLength() > 0)
             {
                 var first = results[0];
-                if (first.TryGetProperty("row_id", out var rowId) && rowId.TryGetInt32(out var id))
+                if (first.TryGetProperty("row_id", out var rowId) && rowId.TryGetInt32(out var id) && id > 0)
                 {
                     return id;
                 }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -1092,33 +1156,98 @@ internal sealed class MainForm : Form
         return null;
     }
 
-    private Task NavigateAndWaitAsync(WebView2 view, Uri uri)
+    private async Task NavigateAndWaitAsync(
+        WebView2 view,
+        Uri uri,
+        CancellationToken cancellationToken)
     {
-        var core = view.CoreWebView2 ?? throw new InvalidOperationException("WebView2 is not ready.");
-        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        void Handler(object? sender, CoreWebView2NavigationCompletedEventArgs args)
+        if (!IsTrustedResolverUri(uri))
         {
-            core.NavigationCompleted -= Handler;
-            tcs.TrySetResult(args.IsSuccess);
+            throw new InvalidOperationException("Resolver navigation target is not trusted.");
+        }
+        var core = view.CoreWebView2 ?? throw new InvalidOperationException("WebView2 is not ready.");
+        var tcs = new TaskCompletionSource<CoreWebView2NavigationCompletedEventArgs>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        ulong navigationId = 0;
+
+        void StartingHandler(object? sender, CoreWebView2NavigationStartingEventArgs args)
+        {
+            if (!Uri.TryCreate(args.Uri, UriKind.Absolute, out var navigationUri)
+                || !IsTrustedResolverUri(navigationUri))
+            {
+                args.Cancel = true;
+                tcs.TrySetException(new InvalidOperationException("Resolver redirect target is not trusted."));
+                return;
+            }
+            navigationId = args.NavigationId;
         }
 
-        core.NavigationCompleted += Handler;
-        view.Source = uri;
-        return tcs.Task;
+        void CompletedHandler(object? sender, CoreWebView2NavigationCompletedEventArgs args)
+        {
+            if (navigationId == 0 || args.NavigationId != navigationId)
+            {
+                return;
+            }
+            tcs.TrySetResult(args);
+        }
+
+        core.NavigationStarting += StartingHandler;
+        core.NavigationCompleted += CompletedHandler;
+        using var navigationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        navigationCancellation.CancelAfter(NavigationTimeout);
+        try
+        {
+            core.Navigate(uri.AbsoluteUri);
+            var result = await tcs.Task.WaitAsync(navigationCancellation.Token);
+            if (!result.IsSuccess)
+            {
+                throw new HttpRequestException($"Navigation failed: {result.WebErrorStatus}");
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            core.Stop();
+            throw new TimeoutException($"Navigation timed out: {uri.Host}");
+        }
+        catch (OperationCanceledException)
+        {
+            core.Stop();
+            throw;
+        }
+        finally
+        {
+            core.NavigationStarting -= StartingHandler;
+            core.NavigationCompleted -= CompletedHandler;
+        }
     }
+
+    private static bool IsTrustedResolverUri(Uri uri) =>
+        IsTrustedHttpsUri(uri, WikiHost) || IsTrustedHttpsUri(uri, UniversalisHost);
+
+    private static string? GetTrustedHttpsUrl(string? value, string expectedHost) =>
+        TryCreateTrustedHttpsUri(value, expectedHost, out var uri) ? uri.AbsoluteUri : null;
+
+    internal static bool TryCreateTrustedHttpsUri(string? value, string expectedHost, out Uri uri)
+    {
+        uri = null!;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var candidate)
+            || !IsTrustedHttpsUri(candidate, expectedHost))
+        {
+            return false;
+        }
+        uri = candidate;
+        return true;
+    }
+
+    private static bool IsTrustedHttpsUri(Uri uri, string expectedHost) =>
+        uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        && uri.IdnHost.Equals(expectedHost, StringComparison.OrdinalIgnoreCase)
+        && uri.IsDefaultPort
+        && string.IsNullOrEmpty(uri.UserInfo);
 
     private void LogResolver(string message)
     {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(_resolverLogPath)!);
-            File.AppendAllText(_resolverLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
-        }
-        catch
-        {
-            // Ignore logging failures.
-        }
+        LocalStaticServer.LogToFile(message);
     }
 
     private void OpenWikiPreviewBySearch(string query)
@@ -1233,6 +1362,7 @@ internal sealed class MainForm : Form
 
     private void HandleClosed(object? sender, FormClosedEventArgs e)
     {
+        _lifetimeCancellation.Cancel();
         _server?.Dispose();
         _marketView.Dispose();
         _wikiPreviewView.Dispose();
@@ -1243,5 +1373,5 @@ internal sealed class MainForm : Form
     private sealed record WikiResolvePayload(string? Title, string? EnglishName, string[]? EnglishCandidates, string? CargoDebug, string? UniversalisUrl, string? DirectItemId, string? Url, int? BodyTextLength, int? LanguagePanelTextLength);
     private sealed record WikiResolveResult(int? ItemId, string? Title, string? EnglishName, string? Url);
     private sealed record UniversalisResolvePayload(string? Text, string? Href);
-    private sealed record UniversalisResolveResult(int? ItemId, string? Url);
+    internal sealed record UniversalisResolveResult(int? ItemId, string? Url);
 }

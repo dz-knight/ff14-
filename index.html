@@ -49,19 +49,19 @@
                 <button type="button" class="theme-switch__button" data-theme-mode="light">浅色</button>
                 <button type="button" class="theme-switch__button" data-theme-mode="dark">深色</button>
               </div>
-              <label class="theme-switch__picker" for="theme-color-picker">
+              <label class="theme-switch__picker">
                 <span class="theme-switch__caption">颜色盘</span>
                 <input id="theme-color-picker" class="theme-switch__swatch" type="color" value="#bb6b1f" aria-label="主题颜色选择器">
               </label>
               <div class="theme-switch__rgb">
                 <span class="theme-switch__caption">RGB</span>
-                <input id="theme-rgb-input" class="theme-switch__rgb-input" type="text" placeholder="255, 182, 193" aria-label="RGB 颜色代码">
+                <input id="theme-rgb-input" class="theme-switch__rgb-input" type="text" maxlength="32" placeholder="255, 182, 193" aria-label="RGB 颜色代码">
                 <button id="theme-rgb-apply" class="theme-switch__apply" type="button">应用</button>
               </div>
             </div>
           </div>
           <div class="search-panel__bar">
-            <input id="item-search" type="search" placeholder="输入物品名，或输入任务:66358 直接打开任务" autocomplete="off">
+            <input id="item-search" type="search" maxlength="256" placeholder="输入物品名，或输入任务:66358 直接打开任务" autocomplete="off">
             <button id="search-button" type="button">搜索</button>
           </div>
           <div class="search-panel__tips">
@@ -105,7 +105,7 @@
             <h2>国服世界服价格面板</h2>
           </div>
           <div class="table-actions">
-            <input id="world-filter" type="search" placeholder="筛选世界服 / 大区">
+            <input id="world-filter" type="search" maxlength="64" placeholder="筛选世界服 / 大区">
           </div>
         </div>
         <div class="region-filters" id="region-filters"></div>
@@ -113,13 +113,13 @@
           <table class="price-table">
             <thead>
               <tr>
-                <th>大区</th>
-                <th>区域</th>
-                <th>世界服</th>
-                <th>当前最低价</th>
-                <th>上架数</th>
-                <th>库存量</th>
-                <th>最近上传</th>
+                <th scope="col">大区</th>
+                <th scope="col">区域</th>
+                <th scope="col">世界服</th>
+                <th scope="col">当前最低价</th>
+                <th scope="col">上架数</th>
+                <th scope="col">库存量</th>
+                <th scope="col">最近上传</th>
               </tr>
             </thead>
             <tbody id="price-table-body">
@@ -156,13 +156,13 @@
           <table class="price-table ranking-table">
             <thead>
               <tr>
-                <th>排名</th>
-                <th>物品</th>
-                <th>区服</th>
-                <th>当前价格</th>
-                <th>日销量</th>
-                <th>均价</th>
-                <th>更新时间</th>
+                <th scope="col">排名</th>
+                <th scope="col">物品</th>
+                <th scope="col">区服</th>
+                <th scope="col">当前价格</th>
+                <th scope="col">日销量</th>
+                <th scope="col">均价</th>
+                <th scope="col">更新时间</th>
               </tr>
             </thead>
             <tbody id="sales-ranking-table-body">
@@ -212,17 +212,17 @@
 
   <template id="result-item-template">
     <button type="button" class="result-item">
-      <div class="result-item__icon"></div>
-      <div class="result-item__body">
-        <strong class="result-item__name"></strong>
+      <span class="result-item__icon"></span>
+      <span class="result-item__body">
+        <strong class="result-item__name">搜索结果</strong>
         <span class="result-item__meta"></span>
-      </div>
+      </span>
     </button>
   </template>
 
   <script src="./market-calculations.js?v=20260529-v3"></script>
   <script src="./search-ranking.js?v=20260813-v1"></script>
-  <script src="./party-finder.js?v=20260818-v1"></script>
-  <script src="./app.js?v=20260813-v115"></script>
+  <script src="./party-finder.js?v=20260818-v2"></script>
+  <script src="./app.js?v=20260818-v116"></script>
 </body>
 </html>

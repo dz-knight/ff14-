@@ -16,8 +16,12 @@ const SALES_RANKING_BATCH_TIMEOUT_MS = 20000;
 const SALES_RANKING_TAX_RATE = 0.05;
 const SALES_RANKING_CACHE_TTL_MS = 2 * 60 * 1000;
 const SALES_RANKING_STORAGE_TTL_MS = 5 * 60 * 1000;
+const MARKET_CACHE_TTL_MS = 60 * 1000;
 const SEARCH_RESULT_LIMIT = 50;
 const SEARCH_REMOTE_TIMEOUT_MS = 4000;
+const MAX_SEARCH_QUERY_LENGTH = 256;
+const DEFAULT_FETCH_TIMEOUT_MS = 15000;
+const WIKI_RESOLVER_TIMEOUT_MS = 45000;
 const ICON_PROXY_ENDPOINT = "/__icon";
 const LOCAL_ICON_PROXY_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const FETCH_LIMITS = {
@@ -27,6 +31,7 @@ const FETCH_LIMITS = {
   relatedQuests: 16,
   shopSources: 12,
   shopNpcsPerShop: 4,
+  questChain: 32,
 };
 const KNOWN_ITEM_ALIASES = {};
 
@@ -211,7 +216,16 @@ const questColumns = [
 ];
 
 document.addEventListener("DOMContentLoaded", bootstrap);
-window.addEventListener("popstate", () => loadFromUrl({ replace: true }));
+window.addEventListener("popstate", () => {
+  const routeLoad = loadFromUrl({ replace: true });
+  const routeToken = state.entityLoadToken;
+  routeLoad.catch((error) => {
+    if (routeToken !== state.entityLoadToken) return;
+    console.error(error);
+    setBootStatus("页面加载失败");
+    renderLoadError(error);
+  });
+});
 
 function bindEvents() {
   dom.themeSwitch?.querySelectorAll("[data-theme-mode]").forEach((button) => {
@@ -245,7 +259,9 @@ function bindEvents() {
   dom.searchInput.addEventListener("input", () => handleSearchInput(dom.searchInput.value.trim()));
   dom.worldFilter.addEventListener("input", renderPriceTable);
   dom.salesRankingScope?.addEventListener("change", () => {
+    state.salesRankingToken += 1;
     state.salesRankingScope = dom.salesRankingScope.value || state.salesRankingScope;
+    if (dom.salesRankingButton) dom.salesRankingButton.disabled = false;
     renderSalesRankingIdle();
   });
   dom.salesRankingButton?.addEventListener("click", () => loadSalesRanking());
@@ -288,14 +304,14 @@ async function loadFromUrl({ replace = false } = {}) {
   const params = new URLSearchParams(window.location.search);
   const type = params.get("type");
   const id = Number(params.get("id"));
-  const keyword = params.get("q");
+  const keyword = String(params.get("q") || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
 
-  if (type === "quest" && id > 0) {
+  if (type === "quest" && Number.isSafeInteger(id) && id > 0) {
     await loadQuestPage(id, { replace });
     return;
   }
 
-  if (type === "item" && id > 0) {
+  if (type === "item" && Number.isSafeInteger(id) && id > 0) {
     await loadItemPage(id, { replace });
     return;
   }
@@ -345,14 +361,27 @@ function renderFatalError(error) {
 
 async function loadMarketMetadata() {
   const [worldsResponse, dataCentersResponse] = await Promise.all([
-    fetchJson(`${MARKET_API}/worlds`),
-    fetchJson(`${MARKET_API}/data-centers`),
+    fetchJson(`${MARKET_API}/worlds`, { timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }),
+    fetchJson(`${MARKET_API}/data-centers`, { timeoutMs: DEFAULT_FETCH_TIMEOUT_MS }),
   ]);
 
-  state.worlds = worldsResponse;
-  state.dataCenters = dataCentersResponse
-    .filter((entry) => entry.region === CN_REGION_NAME)
-    .map((entry) => ({ ...entry }));
+  if (!Array.isArray(worldsResponse) || !Array.isArray(dataCentersResponse)) {
+    throw new Error("Universalis 区服数据格式无效");
+  }
+  const cnDataCenters = dataCentersResponse.filter((entry) => entry?.region === CN_REGION_NAME);
+  if (!cnDataCenters.length || cnDataCenters.some((entry) => !entry?.name || !Array.isArray(entry.worlds))) {
+    throw new Error("Universalis 国服区服数据不完整");
+  }
+
+  state.worlds = worldsResponse
+    .filter((entry) => entry && Number.isSafeInteger(Number(entry.id)) && Number(entry.id) > 0)
+    .map((entry) => ({ ...entry, id: Number(entry.id) }));
+  state.dataCenters = cnDataCenters.map((entry) => ({
+    ...entry,
+    worlds: entry.worlds
+      .map(Number)
+      .filter((worldId) => Number.isSafeInteger(worldId) && worldId > 0),
+  }));
   state.worldMap = new Map();
 
   for (const dataCenter of state.dataCenters) {
@@ -421,10 +450,17 @@ function getMarketScopeOptions() {
   return options;
 }
 
+function setSearchButtonBusy(busy) {
+  dom.searchButton.disabled = Boolean(busy);
+  dom.searchButton.textContent = busy ? "搜索中" : "搜索";
+}
+
 function handleSearchInput(keyword) {
+  keyword = String(keyword || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
   window.clearTimeout(state.searchTimer);
   const token = ++state.searchToken;
   state.entityLoadToken += 1;
+  setSearchButtonBusy(false);
   if (!keyword) {
     dom.searchResults.classList.add("hidden");
     dom.searchResults.innerHTML = "";
@@ -453,12 +489,12 @@ function handleSearchInput(keyword) {
 }
 
 async function performSearch(keyword, { replace = false } = {}) {
+  keyword = String(keyword || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
   if (!keyword) {
     return;
   }
 
-  dom.searchButton.disabled = true;
-  dom.searchButton.textContent = "搜索中";
+  setSearchButtonBusy(true);
   setLoadingState(keyword);
   const token = ++state.searchToken;
   state.entityLoadToken += 1;
@@ -500,6 +536,9 @@ async function performSearch(keyword, { replace = false } = {}) {
 
     if (questIntent.forceQuestKeyword) {
       const forcedQuestResults = await searchQuests(questIntent.forceQuestKeyword);
+      if (token !== state.searchToken) {
+        return;
+      }
       const mappedQuestResults = forcedQuestResults.map((entry) => ({
         type: "quest",
         id: entry.ID,
@@ -547,10 +586,13 @@ async function performSearch(keyword, { replace = false } = {}) {
     renderAmbiguousSearchResult(keyword, results);
   } catch (error) {
     console.error(error);
-    renderLoadError(error);
+    if (token === state.searchToken) {
+      renderLoadError(error);
+    }
   } finally {
-    dom.searchButton.disabled = false;
-    dom.searchButton.textContent = "搜索";
+    if (token === state.searchToken) {
+      setSearchButtonBusy(false);
+    }
   }
 }
 
@@ -564,31 +606,41 @@ async function searchEntities(keyword, { allowDeepFallback = true } = {}) {
     searchItems(keyword, { allowDeepFallback }),
     searchQuests(keyword),
   ]).then(([itemsResult, questsResult]) => {
-    const items = itemsResult.status === "fulfilled" ? itemsResult.value : [];
-    const quests = questsResult.status === "fulfilled" ? questsResult.value : [];
+    const items = itemsResult.status === "fulfilled" && Array.isArray(itemsResult.value) ? itemsResult.value : [];
+    const quests = questsResult.status === "fulfilled" && Array.isArray(questsResult.value) ? questsResult.value : [];
     if (itemsResult.status === "rejected") {
       debugLog(`[searchEntities:items-failed] keyword=${keyword} error=${itemsResult.reason?.message || itemsResult.reason}`);
     }
     if (questsResult.status === "rejected") {
       debugLog(`[searchEntities:quests-failed] keyword=${keyword} error=${questsResult.reason?.message || questsResult.reason}`);
     }
+    if (itemsResult.status === "rejected" && questsResult.status === "rejected") {
+      throw new Error("远程物品与任务数据源均不可用，本地映射也未找到匹配结果");
+    }
 
     const mappedItems = mapItemsToSearchEntities(items);
 
-    const mappedQuests = quests.map((entry) => ({
-      type: "quest",
-      id: entry.ID,
-      name: entry.Name || entry.Name_en || `任务 #${entry.ID}`,
-      subtitle: `${entry.JournalGenre?.Name || "任务"} · 等级 ${entry.ClassJobLevel0 || 0} · ${entry.Name_en || "无英文名"}`,
-      icon: entry.Icon,
-      raw: entry,
-    }));
+    const mappedQuests = quests
+      .filter((entry) => Number.isSafeInteger(Number(entry?.ID)) && Number(entry.ID) > 0)
+      .map((entry) => ({
+        type: "quest",
+        id: Number(entry.ID),
+        name: entry.Name || entry.Name_en || `任务 #${entry.ID}`,
+        subtitle: `${entry.JournalGenre?.Name || "任务"} · 等级 ${entry.ClassJobLevel0 || 0} · ${entry.Name_en || "无英文名"}`,
+        icon: entry.Icon,
+        raw: entry,
+      }));
 
     const combined = rankSearchResults([...mappedItems, ...mappedQuests], keyword);
     if (!combined.length) {
       state.caches.search.delete(cacheKey);
     }
     return combined;
+  }).catch((error) => {
+    if (state.caches.search.get(cacheKey) === promise) {
+      state.caches.search.delete(cacheKey);
+    }
+    throw error;
   });
 
   state.caches.search.set(cacheKey, promise);
@@ -600,14 +652,16 @@ function searchEntitiesFromKnownAlias(keyword, exactAlias) {
 }
 
 function mapItemsToSearchEntities(items) {
-  return items.map((entry) => ({
-    type: "item",
-    id: entry.ID,
-    name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
-    subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
-    icon: entry.Icon,
-    raw: entry,
-  }));
+  return (Array.isArray(items) ? items : [])
+    .filter((entry) => Number.isSafeInteger(Number(entry?.ID)) && Number(entry.ID) > 0)
+    .map((entry) => ({
+      type: "item",
+      id: Number(entry.ID),
+      name: entry.Name || entry.Name_en || `物品 #${entry.ID}`,
+      subtitle: `${entry.ItemUICategory?.Name || "未分类"} · 物品等级 ${entry.LevelItem || 0} · ${entry.Name_en || "无英文名"}`,
+      icon: entry.Icon,
+      raw: entry,
+    }));
 }
 
 function rankSearchResults(results, keyword) {
@@ -695,8 +749,16 @@ async function searchItemsFromRemote(keyword, { allowDeepFallback = true } = {})
   const encoded = encodeURIComponent(keyword);
   const columns = encodeURIComponent("ID,Name,Name_en,Name_ja,Icon,LevelItem,ItemUICategory.Name");
   const primaryUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=chs&limit=50&columns=${columns}`;
-  const primary = await fetchJson(primaryUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS });
-  const results = primary.Results || [];
+  let remoteError = null;
+  const primary = await fetchJson(primaryUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS }).catch((error) => {
+    remoteError = error;
+    debugLog(`[searchItems:primary-failed] keyword=${keyword} error=${error?.message || error}`);
+    return null;
+  });
+  if (primary && !Array.isArray(primary.Results)) {
+    remoteError = new Error("物品数据源返回格式无效");
+  }
+  const results = Array.isArray(primary?.Results) ? primary.Results.slice(0, SEARCH_RESULT_LIMIT) : [];
   debugLog(`[searchItems:primary] keyword=${keyword} count=${results.length}`);
 
   if (results.length > 0) {
@@ -704,8 +766,15 @@ async function searchItemsFromRemote(keyword, { allowDeepFallback = true } = {})
   }
 
   const fallbackUrl = `${ENCYCLOPEDIA_API}/search?indexes=Item&string=${encoded}&language=en&limit=50&columns=${columns}`;
-  const fallback = await fetchJson(fallbackUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS });
-  const fallbackResults = fallback.Results || [];
+  const fallback = await fetchJson(fallbackUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS }).catch((error) => {
+    remoteError = remoteError || error;
+    debugLog(`[searchItems:fallback-failed] keyword=${keyword} error=${error?.message || error}`);
+    return null;
+  });
+  if (fallback && !Array.isArray(fallback.Results)) {
+    remoteError = remoteError || new Error("物品数据源返回格式无效");
+  }
+  const fallbackResults = Array.isArray(fallback?.Results) ? fallback.Results.slice(0, SEARCH_RESULT_LIMIT) : [];
   debugLog(`[searchItems:fallback-en] keyword=${keyword} count=${fallbackResults.length}`);
   if (fallbackResults.length > 0) {
     return fallbackResults;
@@ -713,6 +782,9 @@ async function searchItemsFromRemote(keyword, { allowDeepFallback = true } = {})
 
   if (!allowDeepFallback) {
     debugLog(`[searchItems:skip-deep-fallback] keyword=${keyword}`);
+    if (remoteError) {
+      throw new Error(`物品数据源不可用：${remoteError?.message || remoteError}`);
+    }
     return [];
   }
 
@@ -724,6 +796,10 @@ async function searchItemsFromRemote(keyword, { allowDeepFallback = true } = {})
       englishName: wikiResolved.englishName || wikiResolved.title || keyword,
       description: "该物品通过国服 Wiki -> Universalis 英文站兜底解析得到，当前价格可用，但百科详情可能不完整。",
     });
+  }
+
+  if (remoteError) {
+    throw new Error(`物品数据源不可用：${remoteError?.message || remoteError}`);
   }
 
   return [];
@@ -748,27 +824,31 @@ function normalizeSearchKey(value) {
 }
 
 function buildResolvedAliasItems(keyword, resolved) {
+  const itemId = Number(resolved?.itemId);
+  if (!Number.isSafeInteger(itemId) || itemId <= 0) {
+    return [];
+  }
   const normalizedKeyword = normalizeSearchKey(keyword);
   state.resolvedQueries.set(normalizedKeyword, {
-    itemId: resolved.itemId,
+    itemId,
     name: resolved.name || keyword,
     englishName: resolved.englishName || keyword,
     icon: resolved.icon || "",
     fast: true,
     description: resolved.description || "",
   });
-  state.resolvedAliases.set(resolved.itemId, {
+  state.resolvedAliases.set(itemId, {
     preferredName: resolved.name || keyword,
     preferredEnglishName: resolved.englishName || keyword,
     preferredDescription: resolved.description || "该物品通过中文别名映射或 Wiki/英文站兜底解析得到，当前价格可用，但百科详情可能不完整。",
     icon: resolved.icon || "",
     fast: !!resolved.fast,
   });
-  state.caches.item.delete(resolved.itemId);
+  state.caches.item.delete(itemId);
 
   return [
     {
-      ID: resolved.itemId,
+      ID: itemId,
       Name: resolved.name || keyword,
       Name_en: resolved.englishName || keyword,
       Name_ja: "",
@@ -783,14 +863,16 @@ async function searchQuests(keyword) {
   const encoded = encodeURIComponent(keyword);
   const columns = encodeURIComponent("ID,Name,Name_en,Name_ja,Icon,JournalGenre.Name,ClassJobLevel0");
   const primaryUrl = `${ENCYCLOPEDIA_API}/search?indexes=Quest&string=${encoded}&language=chs&limit=50&columns=${columns}`;
+  let remoteError = null;
   const primary = await fetchJson(primaryUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS }).catch((error) => {
+    remoteError = error;
     debugLog(`[searchQuests:primary-failed] keyword=${keyword} error=${error?.message || error}`);
     return null;
   });
-  if (!primary) {
-    return [];
+  if (primary && !Array.isArray(primary.Results)) {
+    remoteError = new Error("任务数据源返回格式无效");
   }
-  const results = primary?.Results || [];
+  const results = Array.isArray(primary?.Results) ? primary.Results.slice(0, SEARCH_RESULT_LIMIT) : [];
 
   if (results.length > 0) {
     return results;
@@ -798,10 +880,20 @@ async function searchQuests(keyword) {
 
   const fallbackUrl = `${ENCYCLOPEDIA_API}/search?indexes=Quest&string=${encoded}&language=en&limit=50&columns=${columns}`;
   const fallback = await fetchJson(fallbackUrl, { timeoutMs: SEARCH_REMOTE_TIMEOUT_MS }).catch((error) => {
+    remoteError = remoteError || error;
     debugLog(`[searchQuests:fallback-failed] keyword=${keyword} error=${error?.message || error}`);
     return null;
   });
-  return fallback?.Results || [];
+  if (fallback && !Array.isArray(fallback.Results)) {
+    remoteError = remoteError || new Error("任务数据源返回格式无效");
+  }
+  if (Array.isArray(fallback?.Results)) {
+    return fallback.Results.slice(0, SEARCH_RESULT_LIMIT);
+  }
+  if (remoteError) {
+    throw new Error(`任务数据源不可用：${remoteError?.message || remoteError}`);
+  }
+  return [];
 }
 
 function debugLog(message) {
@@ -810,13 +902,16 @@ function debugLog(message) {
     current.push(`[${new Date().toLocaleString("zh-CN", { hour12: false })}] ${message}`);
     const next = current.slice(-200);
     localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(next));
-    fetch("/__debug_log", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify({ Message: message }),
-    }).catch(() => {});
+    if (window.__HOST_BRIDGE__) {
+      fetchJson("/__debug_log", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({ Message: message }),
+        timeoutMs: 2000,
+      }).catch(() => {});
+    }
   } catch {
     // ignore debug log failures
   }
@@ -1026,7 +1121,11 @@ function renderSearchHistory() {
   });
 
   dom.searchHistory.querySelector("#clear-search-history")?.addEventListener("click", () => {
-    localStorage.removeItem(SEARCH_HISTORY_KEY);
+    try {
+      localStorage.removeItem(SEARCH_HISTORY_KEY);
+    } catch {
+      // Search remains usable when storage is blocked or full.
+    }
     renderSearchHistory();
   });
 }
@@ -1045,7 +1144,7 @@ function loadSearchHistory() {
 }
 
 function saveSearchHistory(keyword) {
-  const value = String(keyword || "").trim();
+  const value = String(keyword || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
   if (!value) {
     return;
   }
@@ -1053,7 +1152,11 @@ function saveSearchHistory(keyword) {
   const current = loadSearchHistory().filter((item) => item !== value);
   current.unshift(value);
   const next = current.slice(0, SEARCH_HISTORY_LIMIT);
-  localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
+  try {
+    localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(next));
+  } catch {
+    return;
+  }
   renderSearchHistory();
 }
 
@@ -1127,9 +1230,16 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   const gatherIds = gatheringItemIds.slice(0, FETCH_LIMITS.gatherItems);
   const aliasMeta = state.resolvedAliases.get(itemId) || null;
   const shouldSkipRelatedQuestSearch = !!aliasMeta?.fast || !Object.keys(links || {}).length;
+  const marketRowsPromise = getMarketRows(itemId);
+  marketRowsPromise.then((marketRows) => {
+    if (loadToken !== state.entityLoadToken) return;
+    state.currentWorldRows = marketRows;
+    renderMarketOverview(item, marketRows);
+    renderPriceTable();
+  }).catch(() => {});
 
   const [marketRows, craftRecipes, usageRecipes, gatherData, relatedQuests, shopSources] = await Promise.all([
-    getMarketRows(itemId),
+    marketRowsPromise,
     Promise.all(craftIds.map((id) => getRecipe(id))),
     Promise.all(limitedUsageRecipeIds.map((id) => getRecipe(id))),
     Promise.all(gatherIds.map((id) => getGatheringEntry(id))),
@@ -1177,7 +1287,10 @@ async function loadQuestPage(questId, { replace = false } = {}) {
   if (loadToken !== state.entityLoadToken) {
     return;
   }
-  const questChain = await getQuestChainData(quest);
+  const questChain = await getQuestChainData(quest).catch((error) => {
+    debugLog(`[questChain:failed] questId=${questId} error=${error?.message || error}`);
+    return { previous: [], next: [] };
+  });
   if (loadToken !== state.entityLoadToken) {
     return;
   }
@@ -1193,8 +1306,18 @@ async function loadQuestPage(questId, { replace = false } = {}) {
 }
 
 async function getItem(itemId) {
+  itemId = Number(itemId);
+  if (!Number.isSafeInteger(itemId) || itemId <= 0) {
+    throw new Error("物品 ID 无效");
+  }
   if (!state.caches.item.has(itemId)) {
-    state.caches.item.set(itemId, fetchItemWithFallback(itemId));
+    const promise = fetchItemWithFallback(itemId).catch((error) => {
+      if (state.caches.item.get(itemId) === promise) {
+        state.caches.item.delete(itemId);
+      }
+      throw error;
+    });
+    state.caches.item.set(itemId, promise);
   }
   return state.caches.item.get(itemId);
 }
@@ -1233,6 +1356,10 @@ async function fetchItemWithFallback(itemId) {
   }
 
   const xivapi = await fetchXivApiItem(itemId).catch(() => null);
+  const primaryHasIdentity = Boolean(primary && (primary.Name || primary.Name_en));
+  if (!primaryHasIdentity && !xivapi && !aliasMeta) {
+    throw new Error(`物品 #${itemId} 的百科数据暂不可用`);
+  }
   return applyAliasMetaToItem(mergeItemPayload(primary, xivapi, itemId), aliasMeta, itemId);
 }
 
@@ -1240,7 +1367,7 @@ function needsXivApiSupplement(item, aliasMeta) {
   if (!item) {
     return true;
   }
-  if (!item.Name && !item.Name_en && aliasMeta) {
+  if (!item.Name && !item.Name_en) {
     return true;
   }
   if (!item.Icon) {
@@ -1252,14 +1379,17 @@ function needsXivApiSupplement(item, aliasMeta) {
 async function fetchXivApiItem(itemId) {
   const url = `https://v2.xivapi.com/api/sheet/Item/${itemId}?fields=Name,Description,Icon,ItemUICategory.Name,LevelItem,CanBeHq,IsUntradable,Patch`;
   const payload = await fetchJson(url);
-  const fields = payload?.fields || {};
+  const fields = payload?.fields;
+  if (!fields || typeof fields !== "object" || !String(fields.Name || "").trim()) {
+    throw new Error(`XIVAPI 未返回物品 #${itemId} 的有效数据`);
+  }
   return {
     ID: itemId,
     Name: fields.Name || "",
     Name_en: fields.Name || "",
     Name_ja: "",
     Description: fields.Description || "",
-    Icon: xivApiIconPathToUrl(fields.Icon?.path),
+    Icon: normalizeIconPath(fields.Icon?.path),
     ItemUICategory: {
       Name: fields.ItemUICategory?.fields?.Name || "未分类",
     },
@@ -1280,7 +1410,7 @@ function mergeItemPayload(primary, fallback, itemId) {
   const source = primary || {};
   const backup = fallback || {};
   return {
-    ID: source.ID || backup.ID || itemId,
+    ID: itemId,
     Name: source.Name || backup.Name || "",
     Name_en: source.Name_en || backup.Name_en || backup.Name || "",
     Name_ja: source.Name_ja || backup.Name_ja || "",
@@ -1339,27 +1469,65 @@ function applyAliasMetaToItem(item, aliasMeta, itemId) {
 }
 
 async function getQuest(questId) {
+  questId = Number(questId);
+  if (!Number.isSafeInteger(questId) || questId <= 0) {
+    throw new Error("任务 ID 无效");
+  }
   if (!state.caches.quest.has(questId)) {
     const columns = encodeURIComponent(questColumns.join(","));
     const url = `${ENCYCLOPEDIA_API}/quest/${questId}?language=chs&columns=${columns}`;
-    state.caches.quest.set(questId, fetchJson(url));
+    const promise = fetchJson(url).then((payload) => {
+      const returnedId = Number(payload?.ID);
+      if (!Number.isSafeInteger(returnedId) || returnedId !== questId) {
+        throw new Error(`任务 #${questId} 的数据格式无效`);
+      }
+      return payload;
+    }).catch((error) => {
+      if (state.caches.quest.get(questId) === promise) {
+        state.caches.quest.delete(questId);
+      }
+      throw error;
+    });
+    state.caches.quest.set(questId, promise);
   }
   return state.caches.quest.get(questId);
 }
 
 async function getRecipe(recipeId) {
+  recipeId = Number(recipeId);
+  if (!Number.isSafeInteger(recipeId) || recipeId <= 0) {
+    return null;
+  }
   if (!state.caches.recipe.has(recipeId)) {
     const columns = encodeURIComponent(recipeColumns.join(","));
     const url = `${ENCYCLOPEDIA_API}/recipe/${recipeId}?language=chs&columns=${columns}`;
-    state.caches.recipe.set(recipeId, fetchJson(url).catch(() => null));
+    const promise = fetchJson(url).then((payload) => {
+      const returnedId = Number(payload?.ID);
+      if (!Number.isSafeInteger(returnedId) || returnedId !== recipeId) {
+        throw new Error(`配方 #${recipeId} 的数据格式无效`);
+      }
+      return payload;
+    }).catch(() => {
+      if (state.caches.recipe.get(recipeId) === promise) state.caches.recipe.delete(recipeId);
+      return null;
+    });
+    state.caches.recipe.set(recipeId, promise);
   }
   return state.caches.recipe.get(recipeId);
 }
 
 async function getGatheringEntry(gatheringItemId) {
+  gatheringItemId = Number(gatheringItemId);
+  if (!Number.isSafeInteger(gatheringItemId) || gatheringItemId <= 0) {
+    return null;
+  }
   if (!state.caches.gatherItem.has(gatheringItemId)) {
     const url = `${ENCYCLOPEDIA_API}/gatheringitem/${gatheringItemId}?language=chs`;
-    state.caches.gatherItem.set(gatheringItemId, fetchJson(url).catch(() => null));
+    const promise = fetchJson(url).catch(() => {
+      if (state.caches.gatherItem.get(gatheringItemId) === promise) state.caches.gatherItem.delete(gatheringItemId);
+      return null;
+    });
+    state.caches.gatherItem.set(gatheringItemId, promise);
   }
 
   const entry = await state.caches.gatherItem.get(gatheringItemId);
@@ -1373,9 +1541,17 @@ async function getGatheringEntry(gatheringItemId) {
 }
 
 async function getGatheringBase(baseId) {
+  baseId = Number(baseId);
+  if (!Number.isSafeInteger(baseId) || baseId <= 0) {
+    return null;
+  }
   if (!state.caches.gatherBase.has(baseId)) {
     const url = `${ENCYCLOPEDIA_API}/gatheringpointbase/${baseId}?language=chs`;
-    state.caches.gatherBase.set(baseId, fetchJson(url).catch(() => null));
+    const promise = fetchJson(url).catch(() => {
+      if (state.caches.gatherBase.get(baseId) === promise) state.caches.gatherBase.delete(baseId);
+      return null;
+    });
+    state.caches.gatherBase.set(baseId, promise);
   }
 
   const base = await state.caches.gatherBase.get(baseId);
@@ -1389,18 +1565,28 @@ async function getGatheringBase(baseId) {
 }
 
 async function getGatheringPoint(pointId) {
+  pointId = Number(pointId);
+  if (!Number.isSafeInteger(pointId) || pointId <= 0) {
+    return null;
+  }
   if (!state.caches.gatherPoint.has(pointId)) {
     const url = `${ENCYCLOPEDIA_API}/gatheringpoint/${pointId}?language=chs`;
-    state.caches.gatherPoint.set(pointId, fetchJson(url).catch(() => null));
+    const promise = fetchJson(url).catch(() => {
+      if (state.caches.gatherPoint.get(pointId) === promise) state.caches.gatherPoint.delete(pointId);
+      return null;
+    });
+    state.caches.gatherPoint.set(pointId, promise);
   }
   return state.caches.gatherPoint.get(pointId);
 }
 
 async function getMarketRows(itemId) {
-  if (state.caches.market.has(itemId)) {
-    return state.caches.market.get(itemId);
+  const cached = state.caches.market.get(itemId);
+  if (cached && Date.now() - cached.loadedAt < MARKET_CACHE_TTL_MS) {
+    return cached.promise;
   }
 
+  let failedDataCenters = 0;
   const promise = Promise.all(
     state.dataCenters.map(async (dataCenter) => {
       const url = `${MARKET_API}/${encodeURIComponent(dataCenter.name)}/${itemId}`;
@@ -1408,12 +1594,16 @@ async function getMarketRows(itemId) {
         const payload = await fetchJson(url);
         return buildWorldRowsFromPayload(dataCenter, payload);
       } catch (error) {
+        failedDataCenters += 1;
         console.error(`读取 ${dataCenter.name} 市场数据失败`, error);
         return dataCenter.worlds.map((worldId) => buildEmptyWorldRow(dataCenter, worldId));
       }
     })
-  ).then((groups) =>
-    groups.flat().sort((left, right) => {
+  ).then((groups) => {
+    if (failedDataCenters > 0 && state.caches.market.get(itemId)?.promise === promise) {
+      state.caches.market.delete(itemId);
+    }
+    return groups.flat().sort((left, right) => {
       const leftMissing = left.minPrice == null ? 1 : 0;
       const rightMissing = right.minPrice == null ? 1 : 0;
       if (leftMissing !== rightMissing) {
@@ -1423,81 +1613,20 @@ async function getMarketRows(itemId) {
         return (left.minPrice || Number.MAX_SAFE_INTEGER) - (right.minPrice || Number.MAX_SAFE_INTEGER);
       }
       return left.worldName.localeCompare(right.worldName, "zh-CN");
-    })
-  );
-
-  state.caches.market.set(itemId, promise);
-  return promise;
-}
-
-function buildWorldRowsFromPayload(dataCenter, payload) {
-  const listings = Array.isArray(payload.listings) ? payload.listings : [];
-  const uploadTimes = payload.worldUploadTimes || {};
-  const grouped = new Map();
-
-  for (const listing of listings) {
-    const worldId = Number(listing.worldID);
-    const listingId = listing.listingID || `${worldId}-${listing.pricePerUnit}-${listing.quantity}`;
-    if (!grouped.has(worldId)) {
-      grouped.set(worldId, {
-        listingIds: new Set(),
-        minPrice: null,
-        listingCount: 0,
-        unitsForSale: 0,
-      });
-    }
-
-    const record = grouped.get(worldId);
-    if (record.listingIds.has(listingId)) {
-      continue;
-    }
-
-    record.listingIds.add(listingId);
-    record.listingCount += 1;
-    record.unitsForSale += Number(listing.quantity || 0);
-    if (record.minPrice == null || Number(listing.pricePerUnit) < record.minPrice) {
-      record.minPrice = Number(listing.pricePerUnit);
-    }
-  }
-
-  return dataCenter.worlds.map((worldId) => {
-    const world = state.worldMap.get(worldId);
-    const record = grouped.get(worldId);
-    return {
-      worldId,
-      worldName: world?.name || `#${worldId}`,
-      region: world?.region || dataCenter.region,
-      marketRegion: dataCenter.name,
-      dataCenter: dataCenter.name,
-      minPrice: record?.minPrice ?? null,
-      listingCount: record?.listingCount ?? 0,
-      unitsForSale: record?.unitsForSale ?? 0,
-      lastUploadTime: Number(uploadTimes[worldId] || 0) || null,
-    };
+    });
   });
-}
 
-function buildEmptyWorldRow(dataCenter, worldId) {
-  const world = state.worldMap.get(worldId);
-  return {
-    worldId,
-    worldName: world?.name || `#${worldId}`,
-    region: world?.region || dataCenter.region,
-    marketRegion: dataCenter.name,
-    dataCenter: dataCenter.name,
-    minPrice: null,
-    listingCount: 0,
-    unitsForSale: 0,
-    lastUploadTime: null,
-  };
+  state.caches.market.set(itemId, { loadedAt: Date.now(), promise });
+  return promise;
 }
 
 function renderItemOverview(item) {
   const itemName = getPreferredItemName(item) || `#${item.ID}`;
+  const iconMarkup = renderOverviewIcon(item.Icon, itemName);
   const patch = item.GamePatch?.Name || (item.Patch ? `Patch ${item.Patch}` : "未知版本");
   const tags = [
     item.ItemUICategory?.Name ? `<span class="tag">${escapeHtml(item.ItemUICategory.Name)}</span>` : "",
-    `<span class="tag">物品等级 ${item.LevelItem || 0}</span>`,
+    `<span class="tag">物品等级 ${escapeHtml(item.LevelItem || 0)}</span>`,
     `<span class="tag">${item.CanBeHq ? "可 HQ" : "普通品质"}</span>`,
     `<span class="tag">${item.IsUntradable ? "不可交易" : "可交易"}</span>`,
     `<span class="tag">${escapeHtml(patch)}</span>`,
@@ -1506,7 +1635,7 @@ function renderItemOverview(item) {
   const markup = `
     <div class="overview">
       <div class="overview__icon">
-        <img src="${toIconUrl(item.Icon)}" alt="${escapeHtml(itemName)}">
+        ${iconMarkup}
       </div>
       <div class="overview__meta">
         <div class="overview__title">
@@ -1529,6 +1658,7 @@ function renderItemOverview(item) {
 
 function renderQuestOverview(quest) {
   const questName = quest.Name || quest.Name_en || `#${quest.ID}`;
+  const iconMarkup = renderOverviewIcon(quest.Icon, questName);
   const region = quest.IssuerLocation?.Map?.PlaceNameRegion?.Name || quest.IssuerLocation?.PlaceName?.Name || "未知区域";
   const mapName = quest.IssuerLocation?.Map?.PlaceName?.Name || "未知地图";
   const issuer = quest.IssuerStart?.Name || "未知发布者";
@@ -1537,13 +1667,13 @@ function renderQuestOverview(quest) {
   const tags = [
     `<span class="tag">任务</span>`,
     `<span class="tag">${escapeHtml(quest.JournalGenre?.Name || "任务线")}</span>`,
-    `<span class="tag">等级 ${quest.ClassJobLevel0 || 0}</span>`,
+    `<span class="tag">等级 ${escapeHtml(quest.ClassJobLevel0 || 0)}</span>`,
   ].join("");
 
   const markup = `
     <div class="overview">
       <div class="overview__icon">
-        <img src="${toIconUrl(quest.Icon)}" alt="${escapeHtml(questName)}">
+        ${iconMarkup}
       </div>
       <div class="overview__meta">
         <div class="overview__title">
@@ -1581,7 +1711,7 @@ function renderQuestPanels(quest, questChain) {
     <div class="market-overview-grid">
       <div class="metric-card">
         <div class="metric-card__label">任务等级</div>
-        <div class="metric-card__value">${quest.ClassJobLevel0 || 0}</div>
+        <div class="metric-card__value">${escapeHtml(quest.ClassJobLevel0 || 0)}</div>
         <div class="metric-card__detail">${escapeHtml(quest.JournalGenre?.Name || "任务")}</div>
       </div>
       <div class="metric-card">
@@ -1622,7 +1752,7 @@ function renderQuestPanels(quest, questChain) {
       </div>
       <div class="source-card">
         <h3 class="source-card__title">其他奖励</h3>
-        <div class="source-card__meta">经验系数 ${quest.ExpFactor || 0} / 金币 ${formatNumber(quest.GilReward || 0)}</div>
+        <div class="source-card__meta">经验系数 ${escapeHtml(quest.ExpFactor || 0)} / 金币 ${formatNumber(quest.GilReward || 0)}</div>
       </div>
     </div>
   `);
@@ -1796,9 +1926,9 @@ function renderGatherCard(data, item) {
         <div>
           <h3 class="gather-card__name">${escapeHtml(entry.Item?.Name || "采集来源")}</h3>
           <div class="gather-card__meta">
-            采集等级 ${entry.GatheringItemLevel?.GatheringItemLevel || "-"}
+            采集等级 ${escapeHtml(entry.GatheringItemLevel?.GatheringItemLevel || "-")}
             ${entry.IsHidden ? " · 隐藏采集" : ""}
-            ${entry.PerceptionReq ? ` · 识别力需求 ${entry.PerceptionReq}` : ""}
+            ${entry.PerceptionReq ? ` · 识别力需求 ${escapeHtml(entry.PerceptionReq)}` : ""}
           </div>
         </div>
       </div>
@@ -1827,10 +1957,10 @@ function renderRecipeCard(recipe) {
     <div class="recipe-card">
       <div class="recipe-card__header">
         <div class="recipe-card__title">
-          <div class="recipe-card__icon" style="background-image:url('${toIconUrl(recipe.ItemResult?.Icon)}')"></div>
+          <div class="recipe-card__icon"${renderBackgroundIconStyle(recipe.ItemResult?.Icon)}></div>
           <div>
             <h3 class="recipe-card__name">${resultLink || escapeHtml(resultName)}</h3>
-            <div class="recipe-card__meta">${escapeHtml(craftName)} · 生产等级 ${level} · 产出 ${recipe.AmountResult || 1}</div>
+            <div class="recipe-card__meta">${escapeHtml(craftName)} · 生产等级 ${escapeHtml(level)} · 产出 ${escapeHtml(recipe.AmountResult || 1)}</div>
           </div>
         </div>
         <div class="recipe-profit-actions">
@@ -1869,10 +1999,10 @@ function renderUsageCard(recipe, currentItemId) {
   return `
     <div class="usage-result">
       <div class="usage-result__header">
-        <div class="usage-result__icon" style="background-image:url('${toIconUrl(recipe.ItemResult?.Icon)}')"></div>
+        <div class="usage-result__icon"${renderBackgroundIconStyle(recipe.ItemResult?.Icon)}></div>
         <div class="usage-result__body">
           <div class="usage-result__name">${renderRouteLink(recipe.ItemResultTargetID, resultName, "item") || escapeHtml(resultName)}</div>
-          <div class="usage-result__meta">${escapeHtml(craftName)} · 生产等级 ${level}</div>
+          <div class="usage-result__meta">${escapeHtml(craftName)} · 生产等级 ${escapeHtml(level)}</div>
           <div class="usage-result__footer">当前物品消耗数量：x${usedAmount || "-"}</div>
         </div>
       </div>
@@ -2184,6 +2314,9 @@ async function getSalesRanking(scope, onProgress, options = {}) {
   const marketableIds = await getMarketableItemIds();
   const mappedMarketableIds = marketableIds.filter((itemId) => state.itemMappingById?.has(itemId));
   const targetIds = mappedMarketableIds.length ? mappedMarketableIds : marketableIds;
+  if (!targetIds.length) {
+    throw new Error("Universalis 未返回可交易物品列表");
+  }
   const allResults = [];
   const failedBatches = [];
   const batches = chunkArray(targetIds, SALES_RANKING_BATCH_SIZE);
@@ -2195,9 +2328,10 @@ async function getSalesRanking(scope, onProgress, options = {}) {
       const payload = await fetchAggregatedMarket(scope.apiName, batch, {
         timeoutMs: SALES_RANKING_BATCH_TIMEOUT_MS,
       });
-      if (Array.isArray(payload.results)) {
-        allResults.push(...payload.results);
+      if (!payload || !Array.isArray(payload.results)) {
+        throw new Error("Universalis 销售聚合数据格式无效");
       }
+      allResults.push(...payload.results);
     } catch (error) {
       console.error("销售排行批次读取失败", error);
       failedBatches.push({ batch, error });
@@ -2206,6 +2340,10 @@ async function getSalesRanking(scope, onProgress, options = {}) {
       onProgress?.(processed, targetIds.length);
     }
   });
+
+  if (batches.length && failedBatches.length === batches.length) {
+    throw new Error("Universalis 销售排行请求全部失败");
+  }
 
   const calc = getCalculationApi();
   const ranking = calc.buildSalesRanking(allResults, (itemId) => state.itemMappingById?.get(Number(itemId)), {
@@ -2222,8 +2360,10 @@ async function getSalesRanking(scope, onProgress, options = {}) {
   ranking.failedBatchCount = failedBatches.length;
   ranking.rowCount = ranking.rows.length;
   await hydrateSalesRankingNames(ranking);
-  state.caches.salesRanking.set(cacheKey, { loadedAt: now, ranking });
-  saveSalesRankingStorageCache(cacheKey, now, ranking);
+  if (!failedBatches.length) {
+    state.caches.salesRanking.set(cacheKey, { loadedAt: now, ranking });
+    saveSalesRankingStorageCache(cacheKey, now, ranking);
+  }
   return ranking;
 }
 
@@ -2367,11 +2507,25 @@ async function getMarketableItemIds() {
   if (state.caches.marketableItems) {
     return state.caches.marketableItems;
   }
-  const promise = fetchJson(`${MARKET_API}/marketable`).then((payload) =>
-    (Array.isArray(payload) ? payload : [])
-      .map(Number)
-      .filter((itemId) => Number.isFinite(itemId) && itemId > 0)
-  );
+  const promise = fetchJson(`${MARKET_API}/marketable`)
+    .then((payload) => {
+      if (!Array.isArray(payload)) {
+        throw new Error("Universalis 可交易物品数据格式无效");
+      }
+      const itemIds = payload
+        .map(Number)
+        .filter((itemId) => Number.isSafeInteger(itemId) && itemId > 0);
+      if (!itemIds.length) {
+        throw new Error("Universalis 未返回可交易物品列表");
+      }
+      return [...new Set(itemIds)];
+    })
+    .catch((error) => {
+      if (state.caches.marketableItems === promise) {
+        state.caches.marketableItems = null;
+      }
+      throw error;
+    });
   state.caches.marketableItems = promise;
   return promise;
 }
@@ -2569,17 +2723,7 @@ function getRankingIconFallbackUrls(row, primaryUrl) {
 }
 
 function resolveRankingIconUrl(iconPath) {
-  if (!iconPath) {
-    return "";
-  }
-  const proxyUrl = iconPathToProxyUrl(iconPath);
-  if (proxyUrl) {
-    return proxyUrl;
-  }
-  if (/^https?:\/\//i.test(iconPath)) {
-    return iconPath;
-  }
-  return xivApiIconPathToUrl(iconPath);
+  return toIconUrl(iconPath);
 }
 
 function handleRankingIconError(image) {
@@ -2787,10 +2931,10 @@ function renderQuestReferenceCard(quest) {
   return `
     <div class="usage-result">
       <div class="usage-result__header">
-        <div class="usage-result__icon" style="background-image:url('${toIconUrl(quest.Icon)}')"></div>
+        <div class="usage-result__icon"${renderBackgroundIconStyle(quest.Icon)}></div>
         <div class="usage-result__body">
           <div class="usage-result__name">${renderRouteLink(quest.ID, quest.Name, "quest") || escapeHtml(quest.Name)}</div>
-          <div class="usage-result__meta">${escapeHtml(quest.JournalGenre?.Name || "任务")} · 等级 ${quest.ClassJobLevel0 || 0}</div>
+          <div class="usage-result__meta">${escapeHtml(quest.JournalGenre?.Name || "任务")} · 等级 ${escapeHtml(quest.ClassJobLevel0 || 0)}</div>
         </div>
       </div>
     </div>
@@ -2800,8 +2944,9 @@ function renderQuestReferenceCard(quest) {
 async function getQuestChainData(quest) {
   const previous = [];
   const next = [];
-  const visitedPrevious = new Set([quest.ID]);
-  const visitedNext = new Set([quest.ID]);
+  const rootQuestId = Number(quest.ID);
+  const visitedPrevious = new Set([rootQuestId]);
+  const visitedNext = new Set([rootQuestId]);
 
   await collectPreviousQuestChain(quest, previous, visitedPrevious);
   await collectNextQuestChain(quest, next, visitedNext);
@@ -2813,13 +2958,19 @@ async function getQuestChainData(quest) {
 }
 
 async function collectPreviousQuestChain(quest, target, visited) {
+  if (target.length >= FETCH_LIMITS.questChain) {
+    return;
+  }
   const previousCandidates = [
     { id: quest.PreviousQuest0TargetID, name: quest.PreviousQuest0?.Name },
     { id: quest.PreviousQuest1TargetID, name: quest.PreviousQuest1?.Name },
     { id: quest.PreviousQuest2TargetID, name: quest.PreviousQuest2?.Name },
-  ].filter((entry) => entry.id && !visited.has(entry.id));
+  ]
+    .map((entry) => ({ ...entry, id: Number(entry.id) }))
+    .filter((entry) => Number.isSafeInteger(entry.id) && entry.id > 0 && !visited.has(entry.id));
 
   for (const entry of previousCandidates) {
+    if (target.length >= FETCH_LIMITS.questChain) break;
     visited.add(entry.id);
     const previousQuest = await getQuest(entry.id);
     await collectPreviousQuestChain(previousQuest, target, visited);
@@ -2828,8 +2979,11 @@ async function collectPreviousQuestChain(quest, target, visited) {
 }
 
 async function collectNextQuestChain(quest, target, visited) {
-  const nextId = quest.NextQuestTargetID;
-  if (!nextId || visited.has(nextId)) {
+  if (target.length >= FETCH_LIMITS.questChain) {
+    return;
+  }
+  const nextId = Number(quest.NextQuestTargetID);
+  if (!Number.isSafeInteger(nextId) || nextId <= 0 || visited.has(nextId)) {
     return;
   }
 
@@ -3001,7 +3155,10 @@ async function getShopSource(item, shopId) {
     return state.caches.shopSource.get(cacheKey);
   }
 
-  const promise = resolveShopSource(item, shopId);
+  const promise = resolveShopSource(item, shopId).catch((error) => {
+    if (state.caches.shopSource.get(cacheKey) === promise) state.caches.shopSource.delete(cacheKey);
+    throw error;
+  });
   state.caches.shopSource.set(cacheKey, promise);
   return promise;
 }
@@ -3040,6 +3197,7 @@ async function findShopNpcs(shopId) {
       rowId: Number(entry.row_id || 0),
     })).filter((entry) => entry.id > 0))
     .catch((error) => {
+      if (state.caches.shopNpc.get(shopId) === promise) state.caches.shopNpc.delete(shopId);
       debugLog(`[shopNpc:failed] shopId=${shopId} error=${error?.message || error}`);
       return [];
     });
@@ -3099,6 +3257,7 @@ async function getNpcResident(npcId) {
       mapId: Number(payload.Map || 0) || null,
     }))
     .catch((error) => {
+      if (state.caches.npc.get(npcId) === promise) state.caches.npc.delete(npcId);
       debugLog(`[npc:failed] npcId=${npcId} error=${error?.message || error}`);
       return null;
     });
@@ -3125,6 +3284,7 @@ async function getMapInfo(mapId) {
       offsetY: Number(payload.OffsetY || 0),
     }))
     .catch((error) => {
+      if (state.caches.map.get(mapId) === promise) state.caches.map.delete(mapId);
       debugLog(`[map:failed] mapId=${mapId} error=${error?.message || error}`);
       return null;
     });
@@ -3146,7 +3306,15 @@ async function getNpcLocation(npcId, npc = null) {
     return state.caches.npcLocation.get(npcId);
   }
 
-  const promise = resolveNpcLocation(npcId, npc);
+  const promise = resolveNpcLocation(npcId, npc)
+    .then((value) => {
+      if (!value && state.caches.npcLocation.get(npcId) === promise) state.caches.npcLocation.delete(npcId);
+      return value;
+    })
+    .catch((error) => {
+      if (state.caches.npcLocation.get(npcId) === promise) state.caches.npcLocation.delete(npcId);
+      throw error;
+    });
   state.caches.npcLocation.set(npcId, promise);
   return promise;
 }
@@ -3259,10 +3427,13 @@ function parseQuestSearchIntent(keyword) {
 
   const payload = match[1].trim();
   if (/^\d{3,}$/.test(payload)) {
-    return { directQuestId: Number(payload), forceQuestKeyword: null };
+    const questId = Number(payload);
+    return Number.isSafeInteger(questId) && questId > 0
+      ? { directQuestId: questId, forceQuestKeyword: null }
+      : { directQuestId: null, forceQuestKeyword: payload.slice(0, MAX_SEARCH_QUERY_LENGTH) };
   }
 
-  return { directQuestId: null, forceQuestKeyword: payload };
+  return { directQuestId: null, forceQuestKeyword: payload.slice(0, MAX_SEARCH_QUERY_LENGTH) };
 }
 
 function formatQuestCoordinate(location) {
@@ -3288,24 +3459,6 @@ function formatQuestCoordinate(location) {
 function toMapCoordinate(value, scale, offset) {
   const scaled = scale / 100;
   return ((41 / scaled) * ((((value + offset) * scaled) + 1024) / 2048)) + 1;
-}
-
-function summarizeRegions(worldRows) {
-  const buckets = new Map();
-  for (const row of worldRows) {
-    if (!buckets.has(row.region)) {
-      buckets.set(row.region, []);
-    }
-    buckets.get(row.region).push(row);
-  }
-
-  return Array.from(buckets.entries()).map(([region, rows]) => {
-    const priced = rows.filter((row) => row.minPrice != null).sort((a, b) => a.minPrice - b.minPrice);
-    return {
-      region,
-      cheapestPrice: priced[0]?.minPrice ?? null,
-    };
-  });
 }
 
 function renderRegionFilters(regionNames) {
@@ -3428,28 +3581,69 @@ function flattenLinkObject(object, keyPattern) {
 }
 
 function uniqueNumbers(values) {
-  return [...new Set(values.filter((value) => Number.isFinite(Number(value))).map(Number))];
+  return [...new Set(values
+    .map(Number)
+    .filter((value) => Number.isSafeInteger(value) && value > 0))];
 }
 
 async function fetchJson(url, options = {}) {
-  const timeoutMs = Number(options.timeoutMs || 0);
-  const controller = timeoutMs > 0 && typeof AbortController !== "undefined" ? new AbortController() : null;
-  const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+  const configuredTimeout = options.timeoutMs;
+  const timeoutMs = configuredTimeout === undefined
+    ? DEFAULT_FETCH_TIMEOUT_MS
+    : Math.max(0, Number(configuredTimeout) || 0);
+  const externalSignal = options.signal || null;
+  const canAbort = typeof AbortController !== "undefined";
+  const controller = canAbort && (timeoutMs > 0 || externalSignal)
+    ? new AbortController()
+    : null;
+  let timedOut = false;
+  const relayAbort = () => controller?.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      relayAbort();
+    } else if (controller) {
+      externalSignal.addEventListener("abort", relayAbort, { once: true });
+    }
+  }
+  const timer = controller && timeoutMs > 0
+    ? globalThis.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs)
+    : null;
+  const fetchOptions = { ...options };
+  delete fetchOptions.timeoutMs;
+  delete fetchOptions.signal;
+  if (controller) {
+    fetchOptions.signal = controller.signal;
+  } else if (externalSignal) {
+    fetchOptions.signal = externalSignal;
+  }
 
   try {
-    const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
+    const response = await fetch(url, fetchOptions);
     if (!response.ok) {
       throw new Error(`请求失败 ${response.status}: ${url}`);
     }
     return response.json();
   } catch (error) {
+    if (timedOut) {
+      const timeoutError = new Error(`请求超时: ${url}`);
+      timeoutError.name = "TimeoutError";
+      throw timeoutError;
+    }
     if (error?.name === "AbortError") {
-      throw new Error(`请求超时: ${url}`);
+      const abortError = new Error(`请求已取消: ${url}`);
+      abortError.name = "AbortError";
+      throw abortError;
     }
     throw error;
   } finally {
     if (timer) {
-      window.clearTimeout(timer);
+      globalThis.clearTimeout(timer);
+    }
+    if (externalSignal && controller) {
+      externalSignal.removeEventListener("abort", relayAbort);
     }
   }
 }
@@ -3473,11 +3667,12 @@ function renderWikiOpenButton(query, label = "打开国服 Wiki") {
 }
 
 function buildWikiSearchUrl(name) {
-  return `https://ff14.huijiwiki.com/index.php?search=${encodeURIComponent(name || "")}`;
+  const query = String(name || "").slice(0, MAX_SEARCH_QUERY_LENGTH);
+  return `https://ff14.huijiwiki.com/index.php?search=${encodeURIComponent(query)}`;
 }
 
 function buildWikiArticleUrl(name, namespace = "") {
-  const title = String(name || "").trim();
+  const title = String(name || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
   const prefix = String(namespace || "").trim();
   const pageTitle = prefix ? `${prefix}:${title}` : title;
   return title
@@ -3497,24 +3692,19 @@ function toIconUrl(iconPath) {
   if (normalized) {
     return iconPathToXivApiAssetUrl(normalized);
   }
-  if (/^https?:\/\//.test(iconPath)) {
-    return iconPath;
-  }
-  return `https://cafemaker.wakingsands.com${iconPath}`;
+  return "";
 }
 
-function xivApiIconPathToUrl(path) {
-  if (!path) {
-    return "";
-  }
-  if (/^https?:\/\//i.test(path) && !normalizeIconPath(path)) {
-    return path;
-  }
-  const normalized = normalizeIconPath(path);
-  if (!normalized) {
-    return "";
-  }
-  return iconPathToXivApiAssetUrl(normalized);
+function renderOverviewIcon(iconPath, alt) {
+  const iconUrl = toIconUrl(iconPath);
+  return iconUrl
+    ? `<img src="${escapeHtml(iconUrl)}" alt="${escapeHtml(alt)}" loading="eager" decoding="async" referrerpolicy="no-referrer">`
+    : "";
+}
+
+function renderBackgroundIconStyle(iconPath) {
+  const iconUrl = toIconUrl(iconPath);
+  return iconUrl ? ` style="background-image:url('${escapeHtml(iconUrl)}')"` : "";
 }
 
 function iconPathToXivApiAssetUrl(iconPath) {
@@ -3554,7 +3744,10 @@ function normalizeIconPath(iconPath) {
 
   try {
     if (/^https?:\/\//i.test(value)) {
-      value = new URL(value).pathname;
+      const iconUrl = new URL(value);
+      value = iconUrl.hostname === "v2.xivapi.com" && iconUrl.pathname === "/api/asset"
+        ? (iconUrl.searchParams.get("path") || "")
+        : iconUrl.pathname;
     }
   } catch {
     // Keep the original value and let the path validation reject invalid input.
@@ -3648,19 +3841,31 @@ function getAliasDescription(aliasMeta) {
 }
 
 async function openWikiSearch(query) {
-  const text = String(query || "").trim();
+  const text = String(query || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
   if (!text) {
     return;
   }
 
-  if (/^https?:\/\//i.test(text)) {
-    window.open(text, "_blank", "noopener,noreferrer");
+  const directWikiUrl = getSafeWikiUrl(text);
+  if (directWikiUrl) {
+    window.open(directWikiUrl, "_blank", "noopener,noreferrer");
     return;
   }
 
   const resolved = await resolveItemViaWikiFallback(text).catch(() => null);
-  const target = resolved?.url || buildWikiArticleUrl(text) || buildWikiSearchUrl(text);
+  const target = getSafeWikiUrl(resolved?.url) || buildWikiArticleUrl(text) || buildWikiSearchUrl(text);
   window.open(target, "_blank", "noopener,noreferrer");
+}
+
+function getSafeWikiUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" && url.hostname === "ff14.huijiwiki.com"
+      ? url.href
+      : "";
+  } catch {
+    return "";
+  }
 }
 
 const ITEM_MAPPING_URL = "./data/item_mapping.min.json?v=20260609-v1";
@@ -3669,7 +3874,12 @@ async function loadItemMapping() {
   try {
     const payload = await fetchJson(ITEM_MAPPING_URL);
     const entries = Array.isArray(payload?.entries) ? payload.entries : (Array.isArray(payload?.Entries) ? payload.Entries : []);
-    state.itemMappingEntries = entries.map(normalizeMappingEntry).filter(Boolean);
+    state.itemMappingEntries = entries
+      .map(normalizeMappingEntry)
+      .filter((entry) => entry
+        && Number.isSafeInteger(entry.itemId)
+        && entry.itemId > 0
+        && (entry.zhName || entry.enName));
     state.itemMappingExact = new Map();
     state.itemMappingById = new Map();
 
@@ -3679,7 +3889,7 @@ async function loadItemMapping() {
         itemId: Number(itemId),
         name: String(zhName || ""),
         englishName: String(enName || ""),
-        icon: iconPath ? xivApiIconPathToUrl(iconPath) : "",
+        icon: normalizeIconPath(iconPath),
         iconPath: String(iconPath || ""),
         fast: true,
         description: String(zhDescription || "该结果通过本地客户端双语映射表解析得到。"),
@@ -3744,11 +3954,25 @@ async function bootstrap() {
   try {
     setBootStatus("正在载入双语映射与区服数据");
     await loadItemMapping();
-    await loadMarketMetadata();
+    let marketMetadataError = null;
+    try {
+      await loadMarketMetadata();
+    } catch (error) {
+      marketMetadataError = error;
+      state.worlds = [];
+      state.dataCenters = [];
+      state.worldMap = new Map();
+      debugLog(`[marketMetadata:failed] error=${error?.message || error}`);
+    }
     renderRegionFilters(getMarketRegionOptions());
     const cnWorldCount = state.dataCenters.reduce((sum, entry) => sum + entry.worlds.length, 0);
-    setBootStatus(`已载入国服 ${cnWorldCount} 个世界服，双语映射 ${state.itemMappingEntries?.length || 0} 条`);
+    setBootStatus(marketMetadataError
+      ? `区服数据暂不可用，双语映射 ${state.itemMappingEntries?.length || 0} 条仍可查询`
+      : `已载入国服 ${cnWorldCount} 个世界服，双语映射 ${state.itemMappingEntries?.length || 0} 条`);
     await loadFromUrl({ replace: true });
+    if (marketMetadataError) {
+      setBootStatus("Universalis 区服数据读取失败；物品与任务查询仍可使用，价格功能暂不可用");
+    }
   } catch (error) {
     console.error(error);
     setBootStatus("初始化失败");
@@ -3766,13 +3990,14 @@ function resolveKnownItemAlias(keyword) {
 }
 
 function rememberResolvedAlias(keyword, resolved) {
-  if (!resolved?.itemId) {
+  const itemId = Number(resolved?.itemId);
+  if (!Number.isSafeInteger(itemId) || itemId <= 0) {
     return;
   }
 
   const normalizedKeyword = normalizeSearchKey(keyword);
   const alias = {
-    itemId: Number(resolved.itemId),
+    itemId,
     name: String(resolved.name || keyword || ""),
     englishName: String(resolved.englishName || ""),
     icon: String(resolved.icon || ""),
@@ -3812,7 +4037,7 @@ function searchItemsFromMapping(keyword) {
       name: String(zhName || ""),
       englishName: String(enName || ""),
       description: String(zhDescription || ""),
-      icon: iconPath ? xivApiIconPathToUrl(iconPath) : "",
+      icon: normalizeIconPath(iconPath),
       iconPath: String(iconPath || ""),
       fast: true,
     };
@@ -3837,35 +4062,25 @@ async function searchItems(keyword, { allowDeepFallback = true } = {}) {
     return mapped;
   }
 
-  return searchItemsFromRemote(keyword, { allowDeepFallback }).catch((error) => {
-    debugLog(`[searchItems:remote-failed] keyword=${keyword} error=${error?.message || error}`);
-    return [];
-  });
+  return searchItemsFromRemote(keyword, { allowDeepFallback });
 }
 
 function resolveItemViaWikiFallback(keyword) {
-  const query = String(keyword || "").trim();
-  if (!query) {
+  const query = String(keyword || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
+  if (!query || !window.__HOST_BRIDGE__) {
     return Promise.resolve(null);
   }
 
   debugLog(`[wikiFallback:http-begin] keyword=${keyword}`);
-  return fetch(`/__resolve_item`, {
+  return fetchJson(`/__resolve_item`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
       },
       body: JSON.stringify({ Query: query }),
+      timeoutMs: WIKI_RESOLVER_TIMEOUT_MS,
     })
-    .then(async (response) => {
-      debugLog(`[wikiFallback:http-status] keyword=${keyword} status=${response.status}`);
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        debugLog(`[wikiFallback:http-nonok-body] keyword=${keyword} body=${text}`);
-        return null;
-      }
-
-      const data = await response.json();
+    .then((data) => {
       debugLog(`[wikiFallback:http-result] keyword=${keyword} success=${!!data?.success} itemId=${data?.itemId ?? ""} english=${data?.englishName ?? ""}`);
       return (data && (data.success || data.itemId || data.title || data.url || data.englishName)) ? data : null;
     })
@@ -3890,6 +4105,9 @@ async function tryResolveAmbiguousViaWiki(keyword) {
       fast: true,
       description: "该结果通过国服 Wiki 二次兜底解析得到。",
     })[0];
+    if (!entry) {
+      return null;
+    }
 
     return {
       type: "item",
@@ -3934,21 +4152,30 @@ function renderSearchResults(results) {
     const meta = node.querySelector(".result-item__meta");
     const typeLabel = entry.type === "quest" ? "任务" : entry.type === "wiki" ? "Wiki" : "物品";
 
-    icon.style.backgroundImage = `url(${toIconUrl(entry.icon)})`;
+    const iconUrl = toIconUrl(entry.icon);
+    icon.style.backgroundImage = iconUrl ? `url("${iconUrl}")` : "";
     name.textContent = entry.name;
     meta.textContent = `${typeLabel} · ${entry.subtitle}`;
 
     node.addEventListener("click", async () => {
       window.clearTimeout(state.searchTimer);
-      state.searchToken += 1;
+      const selectionToken = ++state.searchToken;
+      setSearchButtonBusy(false);
       dom.searchResults.classList.add("hidden");
       dom.searchInput.value = entry.name;
-      if (entry.type === "quest") {
-        await loadQuestPage(entry.id);
-      } else if (entry.type === "wiki") {
-        openWikiSearch(entry.raw?.wikiUrl || entry.name);
-      } else {
-        await loadItemPage(entry.id);
+      try {
+        if (entry.type === "quest") {
+          await loadQuestPage(entry.id);
+        } else if (entry.type === "wiki") {
+          await openWikiSearch(entry.raw?.wikiUrl || entry.name);
+        } else {
+          await loadItemPage(entry.id);
+        }
+      } catch (error) {
+        if (selectionToken !== state.searchToken) return;
+        console.error(error);
+        setBootStatus("条目加载失败");
+        renderLoadError(error);
       }
     });
 

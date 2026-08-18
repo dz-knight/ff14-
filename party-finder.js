@@ -28,9 +28,14 @@
   const API_BASE = "https://xivpf.littlenightmare.top";
   const API_PAGE_SIZE = 100;
   const DISPLAY_PAGE_SIZE = 20;
-  const REQUEST_TIMEOUT_MS = 10000;
+  const REQUEST_TIMEOUT_MS = 45000;
   const AUTO_REFRESH_MS = 60000;
   const PAGE_BATCH_SIZE = 5;
+  const MAX_API_PAGES = 100;
+  const MAX_API_LISTINGS = API_PAGE_SIZE * MAX_API_PAGES;
+  const MAX_SEARCH_LENGTH = 200;
+  const MAX_NAME_LENGTH = 200;
+  const MAX_DESCRIPTION_LENGTH = 4000;
 
   const CATEGORY_OPTIONS = [
     { value: "DutyRoulette", zh: "随机任务" },
@@ -80,6 +85,14 @@
   };
 
   const ROLE_NAMES = { Tank: "坦克", Healer: "治疗", DPS: "输出" };
+  const JOB_ROLES = {
+    GLA: "Tank", MRD: "Tank", PLD: "Tank", WAR: "Tank", DRK: "Tank", GNB: "Tank",
+    CNJ: "Healer", WHM: "Healer", SCH: "Healer", AST: "Healer", SGE: "Healer",
+    PGL: "DPS", LNC: "DPS", ARC: "DPS", THM: "DPS", ACN: "DPS", ROG: "DPS",
+    MNK: "DPS", DRG: "DPS", BRD: "DPS", BLM: "DPS", SMN: "DPS", NIN: "DPS",
+    MCH: "DPS", SAM: "DPS", RDM: "DPS", BLU: "DPS", DNC: "DPS", RPR: "DPS",
+    VPR: "DPS", PCT: "DPS", BST: "DPS",
+  };
   const DETAIL_LABELS = {
     objective: {
       NONE: "无特别目的",
@@ -118,7 +131,7 @@
   }
 
   function detailLabel(kind, value) {
-    const raw = String(value === null || value === undefined ? "" : value).trim();
+    const raw = cleanText(value, 200);
     if (!raw) return "";
     const labels = DETAIL_LABELS[kind] || {};
     if (labels[raw]) return labels[raw];
@@ -145,11 +158,13 @@
 
   function buildListUrl(params) {
     const query = new URLSearchParams();
-    query.set("page", String(params && params.page ? params.page : 1));
-    query.set("per_page", String(params && params.perPage ? params.perPage : API_PAGE_SIZE));
+    const requestedPage = Math.min(MAX_API_PAGES, Math.max(1, Number(params?.page) || 1));
+    const requestedPageSize = Math.min(API_PAGE_SIZE, Math.max(1, Number(params?.perPage) || API_PAGE_SIZE));
+    query.set("page", String(Math.trunc(requestedPage)));
+    query.set("per_page", String(Math.trunc(requestedPageSize)));
     if (params && params.category) query.set("category", String(params.category));
     if (params && params.datacenter) query.set("datacenter", String(params.datacenter));
-    if (params && params.search) query.set("search", String(params.search));
+    if (params && params.search) query.set("search", String(params.search).slice(0, MAX_SEARCH_LENGTH));
     return `${API_BASE}/api/listings?${query.toString()}`;
   }
 
@@ -162,22 +177,30 @@
     return Number.isFinite(id) && id >= 1000 && id <= 1999;
   }
 
+  function cleanText(value, maxLength) {
+    return String(value === null || value === undefined ? "" : value)
+      .trim()
+      .slice(0, maxLength);
+  }
+
   function normalizeListing(raw) {
-    if (!raw || typeof raw !== "object" || raw.id === null || raw.id === undefined) return null;
-    const world = String(raw.created_world || "");
-    const homeWorld = String(raw.home_world || "");
-    const category = String(raw.category || "");
+    if (!raw || typeof raw !== "object") return null;
+    const id = Number(raw.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    const world = cleanText(raw.created_world, 100);
+    const homeWorld = cleanText(raw.home_world, 100);
+    const category = cleanText(raw.category, 100);
     return {
-      id: raw.id,
-      name: String(raw.name || "匿名"),
-      description: String(raw.description || ""),
-      datacenter: normalizeDatacenter(raw.datacenter),
+      id,
+      name: cleanText(raw.name || "匿名", MAX_NAME_LENGTH),
+      description: cleanText(raw.description, MAX_DESCRIPTION_LENGTH),
+      datacenter: normalizeDatacenter(cleanText(raw.datacenter, 100)),
       world,
       homeWorld: homeWorld && homeWorld !== world ? homeWorld : "",
       createdWorldId: Number(raw.created_world_id) || 0,
       category,
       categoryZh: categoryLabel(category),
-      duty: String(raw.duty || ""),
+      duty: cleanText(raw.duty, 300),
       minItemLevel: Number(raw.min_item_level) || 0,
       slotsFilled: Number(raw.slots_filled) || 0,
       slotsAvailable: Number(raw.slots_available) || 0,
@@ -200,6 +223,80 @@
     }
     return Array.from(byId.values())
       .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
+  }
+
+  function mergeRefreshListings(previousItems, freshItems, replacePrevious) {
+    const fresh = Array.isArray(freshItems) ? freshItems : [];
+    if (replacePrevious || !Array.isArray(previousItems)) return fresh.slice();
+    const byId = new Map();
+    for (const listing of fresh) {
+      if (listing && listing.id !== null && listing.id !== undefined) {
+        byId.set(String(listing.id), listing);
+      }
+    }
+    for (const listing of previousItems) {
+      if (listing && listing.id !== null && listing.id !== undefined && !byId.has(String(listing.id))) {
+        byId.set(String(listing.id), listing);
+      }
+    }
+    return Array.from(byId.values())
+      .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
+  }
+
+  function selectRefreshPage(requestedPage, currentPage, hasCommittedProgress, preserveCurrent) {
+    return preserveCurrent || hasCommittedProgress ? currentPage : requestedPage;
+  }
+
+  function focusedListingPage(focusKey, items, fallbackPage, pageSize) {
+    if (!focusKey || focusKey.type !== "listing" || !Array.isArray(items)) return fallbackPage;
+    const index = items.findIndex((item) => item && String(item.id) === focusKey.value);
+    if (index < 0) return fallbackPage;
+    return Math.floor(index / Math.max(1, Number(pageSize) || DISPLAY_PAGE_SIZE)) + 1;
+  }
+
+  function shouldResumeProgressiveLoad(state) {
+    return Boolean(
+      state
+      && state.allItems !== null
+      && (state.needsReload || state.loadProgress)
+    );
+  }
+
+  function captureListFocus(activeElement, listElement, paginationElement) {
+    if (!activeElement) return null;
+    if (listElement && listElement.contains(activeElement)) {
+      const card = activeElement.closest ? activeElement.closest("[data-pf-id]") : null;
+      const id = card && card.getAttribute("data-pf-id");
+      if (id) return { type: "listing", value: id };
+    }
+    if (paginationElement && paginationElement.contains(activeElement)) {
+      const button = activeElement.closest ? activeElement.closest("[data-pf-action]") : null;
+      const action = button && button.getAttribute("data-pf-action");
+      if (action) return { type: "pagination", value: action };
+    }
+    return null;
+  }
+
+  function restoreListFocus(focusKey, listElement, paginationElement, fallbackElement) {
+    if (!focusKey) return false;
+    const container = focusKey.type === "listing" ? listElement : paginationElement;
+    const attribute = focusKey.type === "listing" ? "data-pf-id" : "data-pf-action";
+    const candidates = container
+      ? Array.from(container.querySelectorAll(`[${attribute}]`))
+      : [];
+    const target = candidates.find((element) => element.getAttribute(attribute) === focusKey.value);
+    if (target && !target.disabled) {
+      target.focus();
+      return true;
+    }
+    if (fallbackElement && typeof fallbackElement.focus === "function") fallbackElement.focus();
+    return false;
+  }
+
+  function runAutoRefresh(state, refresh) {
+    if (!state || !state.open || state.loading || typeof refresh !== "function") return false;
+    refresh(state.page, { preserveCurrent: true, silent: true, preserveScroll: true });
+    return true;
   }
 
   function formatTimeLeft(seconds) {
@@ -231,10 +328,26 @@
 
   function parseSlotJobList(jobText) {
     return String(jobText || "")
+      .slice(0, 500)
       .trim()
       .split(/\s+/)
       .filter(Boolean)
+      .slice(0, 50)
       .map((abbr) => ({ abbr, name: JOB_NAMES[abbr] || `未知职业（${abbr}）` }));
+  }
+
+  function slotRoleLabel(slot) {
+    const inferredRoles = Array.from(new Set(
+      parseSlotJobList(slot && slot.job)
+        .map((job) => JOB_ROLES[job.abbr])
+        .filter(Boolean)
+    ));
+    if (inferredRoles.length >= 3) return "任意职责";
+    if (inferredRoles.length > 0) {
+      return inferredRoles.map((role) => ROLE_NAMES[role]).join(" / ");
+    }
+    const sourceRole = String(slot && slot.role ? slot.role : "").trim();
+    return sourceRole ? (ROLE_NAMES[sourceRole] || "其他职责") : "";
   }
 
   function buildDetailFacts(raw) {
@@ -277,6 +390,25 @@
     return Boolean(error && error.name === "AbortError");
   }
 
+  function normalizePagination(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const total = Number(raw.total);
+    const page = Number(raw.page);
+    const perPage = Number(raw.per_page);
+    const totalPages = Number(raw.total_pages);
+    const isEmptyPage = total === 0 && page === 1 && totalPages === 0;
+    if (
+      !Number.isInteger(total) || total < 0 || total > MAX_API_LISTINGS
+      || !Number.isInteger(page) || page < 1
+      || !Number.isInteger(perPage) || perPage < 1 || perPage > API_PAGE_SIZE
+      || !Number.isInteger(totalPages) || totalPages < 0 || totalPages > MAX_API_PAGES
+      || (!isEmptyPage && (total === 0 || totalPages < 1 || page > totalPages))
+    ) {
+      return null;
+    }
+    return { total, page, perPage, totalPages };
+  }
+
   function createApiClient(fetchImpl, options) {
     const doFetch = fetchImpl || (typeof fetch === "function" ? fetch.bind(globalThis) : null);
     if (!doFetch) throw new Error("party-finder needs a fetch implementation");
@@ -299,10 +431,21 @@
           signal: controller.signal,
           headers: { Accept: "application/json" },
         });
-        const body = await response.json().catch(() => null);
+        let body = null;
+        let invalidJson = false;
+        try {
+          body = await response.json();
+        } catch {
+          invalidJson = true;
+        }
         if (!response.ok) {
           const error = new Error((body && body.error) || `HTTP ${response.status}`);
           error.status = response.status;
+          throw error;
+        }
+        if (invalidJson) {
+          const error = new Error("接口返回格式无效");
+          error.code = "INVALID_RESPONSE";
           throw error;
         }
         return body;
@@ -322,16 +465,28 @@
     return {
       async fetchList(params, requestOptions) {
         const body = await getJson(buildListUrl(params), requestOptions && requestOptions.signal);
+        const pagination = normalizePagination(body && body.pagination);
+        const listings = Array.isArray(body?.data)
+          ? body.data
+          : (Array.isArray(body?.listings) ? body.listings : null);
+        const requestedPage = Math.min(MAX_API_PAGES, Math.max(1, Math.trunc(Number(params?.page) || 1)));
+        if (
+          !body
+          || typeof body !== "object"
+          || !listings
+          || !pagination
+          || pagination.page !== requestedPage
+          || listings.length > pagination.perPage
+          || listings.length > pagination.total
+          || (pagination.total === 0 && listings.length !== 0)
+        ) {
+          const error = new Error("接口返回格式无效");
+          error.code = "INVALID_RESPONSE";
+          throw error;
+        }
         return {
-          data: Array.isArray(body && body.data) ? body.data : [],
-          pagination: body && body.pagination
-            ? {
-              total: Number(body.pagination.total) || 0,
-              page: Number(body.pagination.page) || 1,
-              perPage: Number(body.pagination.per_page) || API_PAGE_SIZE,
-              totalPages: Math.max(1, Number(body.pagination.total_pages) || 1),
-            }
-            : { total: 0, page: 1, perPage: API_PAGE_SIZE, totalPages: 1 },
+          data: listings,
+          pagination,
         };
       },
       async fetchDetail(id, requestOptions) {
@@ -349,13 +504,31 @@
           error.expired = true;
           throw error;
         }
-        return body;
+        const detail = body?.listing && typeof body.listing === "object"
+          ? body.listing
+          : (body?.data && typeof body.data === "object" ? body.data : body);
+        if (
+          !detail
+          || typeof detail !== "object"
+          || Array.isArray(detail)
+          || !Number.isSafeInteger(Number(detail.id))
+          || Number(detail.id) <= 0
+          || String(detail.id) !== String(id)
+        ) {
+          const error = new Error("接口返回格式无效");
+          error.code = "INVALID_RESPONSE";
+          throw error;
+        }
+        return detail;
       },
     };
   }
 
   async function fetchAllListings(client, filters, options) {
     const signal = options && options.signal;
+    const onProgress = options && typeof options.onProgress === "function"
+      ? options.onProgress
+      : null;
     const datacenter = filters && filters.datacenter
       ? datacenterVariants(filters.datacenter).join(",")
       : undefined;
@@ -368,6 +541,20 @@
     const first = await client.fetchList({ ...baseParams, page: 1 }, { signal });
     const pages = [first.data];
     const failedPages = [];
+
+    function progress(done, settledPages) {
+      return {
+        items: collectListings(pages.flat()),
+        failedPages: failedPages.slice(),
+        expectedTotal: first.pagination.total,
+        totalPages: first.pagination.totalPages,
+        settledPages,
+        done,
+      };
+    }
+
+    const firstSettledPage = first.pagination.totalPages === 0 ? 0 : 1;
+    if (onProgress) onProgress(progress(first.pagination.totalPages <= 1, firstSettledPage));
 
     for (let start = 2; start <= first.pagination.totalPages; start += PAGE_BATCH_SIZE) {
       const pageNumbers = [];
@@ -386,14 +573,13 @@
         if (result.status === "fulfilled") pages.push(result.value.data);
         else failedPages.push(pageNumbers[index]);
       });
+      if (onProgress) {
+        const settledPages = Math.min(first.pagination.totalPages, start + pageNumbers.length - 1);
+        onProgress(progress(settledPages >= first.pagination.totalPages, settledPages));
+      }
     }
 
-    return {
-      items: collectListings(pages.flat()),
-      failedPages,
-      expectedTotal: first.pagination.total,
-      totalPages: first.pagination.totalPages,
-    };
+    return progress(true, first.pagination.totalPages);
   }
 
   function esc(value) {
@@ -415,6 +601,7 @@
     view.dataset.pfInitialized = "true";
 
     const client = (options && options.client) || createApiClient();
+    const autoRefreshMs = Number(options && options.autoRefreshMs) || AUTO_REFRESH_MS;
     const listRequests = createRequestCoordinator();
     const detailRequests = createRequestCoordinator();
     const state = {
@@ -425,9 +612,14 @@
       category: "",
       allItems: null,
       failedPages: [],
+      backgroundError: "",
+      loadProgress: null,
+      needsReload: false,
       loading: false,
       lastUpdated: 0,
       autoTimer: null,
+      detailId: "",
+      backgroundAriaHidden: null,
     };
 
     view.innerHTML = [
@@ -445,7 +637,7 @@
       '  </div>',
       '  <div class="pf-filters">',
       '    <form class="pf-filters__form" id="pf-search-form">',
-      '      <input id="pf-search" type="search" placeholder="搜索名称或描述" autocomplete="off">',
+      `      <input id="pf-search" type="search" maxlength="${MAX_SEARCH_LENGTH}" placeholder="搜索名称或描述" autocomplete="off">`,
       '      <button type="submit" class="pf-button">搜索</button>',
       '    </form>',
       '    <select id="pf-datacenter" aria-label="大区筛选">',
@@ -477,6 +669,14 @@
       pagination: doc.getElementById("pf-pagination"),
       detail: doc.getElementById("pf-detail"),
     };
+    const appShell = doc.querySelector(".app-shell");
+    const detailBackgroundElements = [
+      doc.querySelector(".pf-head"),
+      doc.querySelector(".pf-filters"),
+      elements.status,
+      elements.list,
+      elements.pagination,
+    ].filter(Boolean);
 
     function setStatus(message, tone) {
       elements.status.textContent = message || "";
@@ -495,18 +695,81 @@
         : "";
     }
 
-    function cancelDetail() {
+    function setInert(element, inert) {
+      if (!element) return;
+      element.inert = inert;
+      if (inert) element.setAttribute("inert", "");
+      else element.removeAttribute("inert");
+    }
+
+    function setBackgroundBlocked(blocked) {
+      if (!appShell) return;
+      if (blocked) {
+        state.backgroundAriaHidden = appShell.getAttribute("aria-hidden");
+        appShell.setAttribute("aria-hidden", "true");
+        setInert(appShell, true);
+        return;
+      }
+      setInert(appShell, false);
+      if (state.backgroundAriaHidden === null) appShell.removeAttribute("aria-hidden");
+      else appShell.setAttribute("aria-hidden", state.backgroundAriaHidden);
+      state.backgroundAriaHidden = null;
+    }
+
+    function setDetailMode(active) {
+      for (const element of detailBackgroundElements) {
+        setInert(element, active);
+        if (active) element.setAttribute("aria-hidden", "true");
+        else element.removeAttribute("aria-hidden");
+      }
+    }
+
+    function renderListStatus() {
+      const total = state.allItems ? state.allItems.length : 0;
+      const totalPages = Math.max(1, Math.ceil(total / DISPLAY_PAGE_SIZE));
+      if (state.backgroundError) {
+        setStatus(`共 ${total} 条招募；刷新失败：${state.backgroundError}。已保留现有数据。`, "warning");
+      } else if (state.loadProgress) {
+        setStatus(
+          `已显示 ${total} 条招募；已加载接口第 ${state.loadProgress.settledPages} / ${state.loadProgress.totalPages} 页，剩余页面正在后台补充…`,
+          "soft"
+        );
+      } else if (state.failedPages.length > 0) {
+        setStatus(`已加载 ${total} 条；接口第 ${state.failedPages.join("、")} 页失败，请刷新重试。`, "warning");
+      } else if (total === 0) {
+        setStatus("没有符合条件的招募。", "soft");
+      } else {
+        setStatus(`共 ${total} 条招募，第 ${state.page} / ${totalPages} 页`, "soft");
+      }
+    }
+
+    function cancelDetail(cancelOptions) {
+      const restoreStatus = !cancelOptions || cancelOptions.restoreStatus !== false;
+      const restoreFocus = !cancelOptions || cancelOptions.restoreFocus !== false;
+      const detailId = state.detailId;
       detailRequests.cancel();
       elements.detail.classList.add("hidden");
+      setDetailMode(false);
+      state.detailId = "";
+      if (restoreStatus && state.allItems !== null) renderListStatus();
+      if (restoreFocus && state.open) {
+        const card = Array.from(elements.list.querySelectorAll("[data-pf-id]"))
+          .find((item) => item.getAttribute("data-pf-id") === detailId);
+        if (card) card.focus();
+        else elements.search.focus();
+      }
     }
 
     function invalidateList() {
       listRequests.cancel();
       state.allItems = null;
       state.failedPages = [];
+      state.backgroundError = "";
+      state.loadProgress = null;
+      state.needsReload = false;
       elements.list.innerHTML = "";
       elements.pagination.innerHTML = "";
-      cancelDetail();
+      cancelDetail({ restoreStatus: false, restoreFocus: false });
     }
 
     function listingCardHtml(listing) {
@@ -541,35 +804,43 @@
       const previous = Math.max(1, state.page - 1);
       const next = Math.min(totalPages, state.page + 1);
       elements.pagination.innerHTML = [
-        `<button type="button" class="pf-button pf-button--small pf-button--ghost" data-pf-page="${previous}" ${state.page === 1 ? "disabled" : ""}>上一页</button>`,
+        `<button type="button" class="pf-button pf-button--small pf-button--ghost" data-pf-action="previous" data-pf-page="${previous}" ${state.page === 1 ? "disabled" : ""}>上一页</button>`,
         `<span class="pf-pagination__info">第 ${state.page} / ${totalPages} 页 · 共 ${total} 条</span>`,
-        `<button type="button" class="pf-button pf-button--small pf-button--ghost" data-pf-page="${next}" ${state.page === totalPages ? "disabled" : ""}>下一页</button>`,
+        `<button type="button" class="pf-button pf-button--small pf-button--ghost" data-pf-action="next" data-pf-page="${next}" ${state.page === totalPages ? "disabled" : ""}>下一页</button>`,
       ].join("");
     }
 
-    function renderCurrentPage(page) {
+    function renderCurrentPage(page, renderOptions) {
+      const focusKey = captureListFocus(doc.activeElement, elements.list, elements.pagination);
+      const scrollTop = renderOptions && renderOptions.preserveScroll
+        ? elements.list.scrollTop
+        : 0;
       const total = state.allItems ? state.allItems.length : 0;
       const totalPages = Math.max(1, Math.ceil(total / DISPLAY_PAGE_SIZE));
-      state.page = Math.min(Math.max(1, Number(page) || 1), totalPages);
+      const focusPage = focusedListingPage(focusKey, state.allItems, page, DISPLAY_PAGE_SIZE);
+      state.page = Math.min(Math.max(1, Number(focusPage) || 1), totalPages);
       const start = (state.page - 1) * DISPLAY_PAGE_SIZE;
       const items = state.allItems ? state.allItems.slice(start, start + DISPLAY_PAGE_SIZE) : [];
       elements.list.innerHTML = items.map(listingCardHtml).join("");
+      if (renderOptions && renderOptions.preserveScroll) elements.list.scrollTop = scrollTop;
       renderPagination(total, totalPages);
       renderUpdated();
-      if (state.failedPages.length > 0) {
-        setStatus(`已加载 ${total} 条；接口第 ${state.failedPages.join("、")} 页失败，请刷新重试。`, "warning");
-      } else if (total === 0) {
-        setStatus("没有符合条件的招募。", "soft");
-      } else {
-        setStatus(`共 ${total} 条招募，第 ${state.page} / ${totalPages} 页`, "soft");
-      }
+      renderListStatus();
+      restoreListFocus(focusKey, elements.list, elements.pagination, elements.search);
     }
 
-    async function loadPage(page) {
-      if (state.allItems !== null) {
+    async function loadPage(page, loadOptions) {
+      const force = Boolean(loadOptions && loadOptions.force);
+      const preserveCurrent = Boolean(loadOptions && loadOptions.preserveCurrent);
+      const silent = Boolean(loadOptions && loadOptions.silent);
+      if (state.allItems !== null && !force) {
         renderCurrentPage(page);
         return;
       }
+      const previousItems = state.allItems;
+      const previousFailedPages = state.failedPages.slice();
+      const requestedPage = Math.max(1, Number(page) || 1);
+      let hasCommittedProgress = false;
       const request = listRequests.begin();
       const filters = {
         search: state.search,
@@ -577,18 +848,59 @@
         category: state.category,
       };
       setLoading(true);
-      setStatus("正在加载招募数据…", "soft");
-      try {
-        const result = await fetchAllListings(client, filters, { signal: request.signal });
+      if (!silent) setStatus("正在加载招募数据…", "soft");
+
+      function commitProgress(progress) {
         if (!request.isCurrent()) return;
-        state.allItems = result.items;
-        state.failedPages = result.failedPages;
-        state.lastUpdated = Date.now();
-        renderCurrentPage(page);
+        const replacePrevious = progress.done && progress.failedPages.length === 0;
+        state.allItems = preserveCurrent
+          ? mergeRefreshListings(previousItems, progress.items, replacePrevious)
+          : progress.items;
+        state.failedPages = progress.failedPages.slice();
+        state.backgroundError = "";
+        state.loadProgress = progress.done
+          ? null
+          : {
+            settledPages: progress.settledPages,
+            totalPages: progress.totalPages,
+          };
+        if (progress.done) {
+          state.needsReload = false;
+          state.lastUpdated = Date.now();
+        }
+        const renderPage = selectRefreshPage(
+          requestedPage,
+          state.page,
+          hasCommittedProgress,
+          preserveCurrent
+        );
+        hasCommittedProgress = true;
+        renderCurrentPage(renderPage, {
+          preserveScroll: Boolean(loadOptions && loadOptions.preserveScroll),
+        });
+      }
+
+      try {
+        const result = await fetchAllListings(client, filters, {
+          signal: request.signal,
+          onProgress: commitProgress,
+        });
+        if (!request.isCurrent()) return;
+        if (!hasCommittedProgress) commitProgress(result);
       } catch (error) {
         if (!request.isCurrent() || isAbortError(error)) return;
-        state.allItems = null;
-        setStatus(`加载失败：${error && error.message ? error.message : "网络错误"}`, "danger");
+        const message = error && error.message ? error.message : "网络错误";
+        state.loadProgress = null;
+        if (preserveCurrent && previousItems !== null) {
+          state.allItems = previousItems;
+          state.failedPages = previousFailedPages;
+          state.backgroundError = message;
+          renderUpdated();
+          renderListStatus();
+        } else {
+          state.allItems = null;
+          setStatus(`加载失败：${message}`, "danger");
+        }
       } finally {
         if (request.isCurrent()) setLoading(false);
       }
@@ -596,8 +908,10 @@
 
     function slotHtml(slot) {
       const jobs = parseSlotJobList(slot && slot.job);
-      const jobText = jobs.map((job) => job.name).join(" / ") || "自由职业";
-      const role = slot && slot.role ? (ROLE_NAMES[slot.role] || "其他职责") : "";
+      const role = slotRoleLabel(slot);
+      const jobText = role === "任意职责" && jobs.length > 12
+        ? "任意战斗职业"
+        : (jobs.map((job) => job.name).join(" / ") || "自由职业");
       return [
         `<div class="pf-slot ${slot && slot.filled ? "is-filled" : "is-free"}">`,
         `  <span class="pf-slot__state">${slot && slot.filled ? "满" : "空"}</span>`,
@@ -611,7 +925,7 @@
       const listing = normalizeListing(raw);
       if (!listing) throw new Error("招募详情格式无效");
       const facts = buildDetailFacts(raw);
-      const slots = Array.isArray(raw.slots) ? raw.slots : [];
+      const slots = Array.isArray(raw.slots) ? raw.slots.slice(0, 64) : [];
       elements.detail.innerHTML = [
         '<div class="pf-detail__panel">',
         '  <div class="pf-detail__head">',
@@ -635,10 +949,12 @@
         closeButton.addEventListener("click", cancelDetail);
         closeButton.focus();
       }
+      setDetailMode(true);
     }
 
     async function openDetail(id) {
       const request = detailRequests.begin();
+      state.detailId = String(id);
       setStatus("正在加载招募详情…", "soft");
       try {
         const raw = await client.fetchDetail(id, { signal: request.signal });
@@ -656,31 +972,71 @@
       }
     }
 
-    function refresh(page) {
-      invalidateList();
-      loadPage(page || 1);
+    function refresh(page, refreshOptions) {
+      const preserveCurrent = Boolean(refreshOptions && refreshOptions.preserveCurrent);
+      if (!preserveCurrent) invalidateList();
+      return loadPage(page || 1, {
+        force: preserveCurrent,
+        preserveCurrent,
+        silent: Boolean(refreshOptions && refreshOptions.silent),
+        preserveScroll: Boolean(refreshOptions && refreshOptions.preserveScroll),
+      });
+    }
+
+    function trapFocus(event) {
+      const scope = elements.detail.classList.contains("hidden")
+        ? view.querySelector(".pf-window")
+        : elements.detail;
+      if (!scope) return;
+      const focusable = Array.from(scope.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter((element) => !element.closest(".hidden") && !element.closest("[inert]"));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = doc.activeElement;
+      if (event.shiftKey && (active === first || !scope.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !scope.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
     }
 
     function open() {
+      if (state.open) return;
       state.open = true;
       view.classList.remove("hidden");
       view.setAttribute("aria-hidden", "false");
       if (doc.body) doc.body.classList.add("pf-is-open");
-      if (state.allItems === null) loadPage(1);
-      else renderCurrentPage(state.page);
+      elements.search.focus();
+      setBackgroundBlocked(true);
+      if (state.allItems === null) void loadPage(1);
+      else {
+        const resumeInterruptedLoad = state.needsReload;
+        renderCurrentPage(state.page);
+        if (resumeInterruptedLoad) {
+          void refresh(state.page, { preserveCurrent: true, preserveScroll: true });
+        }
+      }
       if (state.autoTimer) clearInterval(state.autoTimer);
-      state.autoTimer = setInterval(() => refresh(state.page), AUTO_REFRESH_MS);
-      setTimeout(() => elements.search.focus(), 0);
+      state.autoTimer = setInterval(() => {
+        runAutoRefresh(state, refresh);
+      }, autoRefreshMs);
     }
 
     function close() {
       state.open = false;
       view.classList.add("hidden");
       view.setAttribute("aria-hidden", "true");
+      state.needsReload = shouldResumeProgressiveLoad(state);
+      state.loadProgress = null;
       listRequests.cancel();
-      cancelDetail();
+      cancelDetail({ restoreStatus: false, restoreFocus: false });
       setLoading(false);
       if (doc.body) doc.body.classList.remove("pf-is-open");
+      setBackgroundBlocked(false);
       if (state.autoTimer) {
         clearInterval(state.autoTimer);
         state.autoTimer = null;
@@ -690,19 +1046,21 @@
 
     entryButton.addEventListener("click", open);
     elements.close.addEventListener("click", close);
-    elements.refresh.addEventListener("click", () => refresh(state.page));
+    elements.refresh.addEventListener("click", () => {
+      void refresh(state.page, { preserveCurrent: true, preserveScroll: true });
+    });
     elements.searchForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      state.search = elements.search.value.trim();
-      refresh(1);
+      state.search = elements.search.value.trim().slice(0, MAX_SEARCH_LENGTH);
+      void refresh(1);
     });
     elements.datacenter.addEventListener("change", () => {
       state.datacenter = elements.datacenter.value;
-      refresh(1);
+      void refresh(1);
     });
     elements.category.addEventListener("change", () => {
       state.category = elements.category.value;
-      refresh(1);
+      void refresh(1);
     });
     elements.pagination.addEventListener("click", (event) => {
       const target = event.target && event.target.closest
@@ -715,15 +1073,21 @@
       const card = event.target && event.target.closest
         ? event.target.closest("[data-pf-id]")
         : null;
-      if (card) openDetail(card.getAttribute("data-pf-id"));
+      if (card) void openDetail(card.getAttribute("data-pf-id"));
     });
     view.addEventListener("mousedown", (event) => {
       if (event.target === view) close();
     });
     doc.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !state.open) return;
-      if (!elements.detail.classList.contains("hidden")) cancelDetail();
-      else close();
+      if (!state.open) return;
+      if (event.key === "Tab") {
+        trapFocus(event);
+        return;
+      }
+      if (event.key === "Escape") {
+        if (!elements.detail.classList.contains("hidden")) cancelDetail();
+        else close();
+      }
     });
 
     return true;
@@ -743,9 +1107,18 @@
     isCnWorldId,
     normalizeListing,
     collectListings,
+    normalizePagination,
+    mergeRefreshListings,
+    selectRefreshPage,
+    focusedListingPage,
+    shouldResumeProgressiveLoad,
+    captureListFocus,
+    restoreListFocus,
+    runAutoRefresh,
     formatTimeLeft,
     formatRelativeTime,
     parseSlotJobList,
+    slotRoleLabel,
     buildDetailFacts,
     createRequestCoordinator,
     createApiClient,

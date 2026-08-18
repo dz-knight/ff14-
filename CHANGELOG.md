@@ -1,6 +1,22 @@
 # Changelog
 
-## v1.1.0 - 2026-08-18
+## v1.1.0 - 2026-08-19
+
+- Changed party-finder loading to render the first API page immediately and append later pages in the background
+- Preserved the last successful listing snapshot on refresh failures and restored the current page, scroll position, and focused listing or pagination control
+- Added response bounds so malformed pagination cannot trigger unbounded background requests
+- Added default network timeouts, stale-search completion guards, retryable failed caches, and degraded startup when Universalis metadata is unavailable
+- Hardened the desktop loopback server against path traversal, wildcard CORS, unsupported methods, oversized request bodies, unbounded concurrency, and unlimited log growth
+- Added bounded Wiki/WebView2 navigation, resolver cancellation, semaphore recovery, a dedicated hidden resolver view, and persistent WebView storage
+- Hardened the local preview server and added deterministic JavaScript and .NET regression tests for the repaired failure modes
+- Changed the publish script to stage and validate new artifacts before replacing existing output, with automatic rollback on replacement failure
+- Fixed an item-detail `ReferenceError` caused by out-of-scope Universalis metadata variables and removed three duplicate market helper implementations
+- Accepted both `data` and `listings` party-finder payloads, including valid empty pagination, while rejecting mismatched response pages
+- Prevented stale sales-ranking requests from replacing a newly selected scope and stopped caching empty or wholly failed ranking responses
+- Kept the Wiki fallback reachable when CafeMaker fails and restricted resolver navigation, redirects, Wiki results, and Universalis results to trusted HTTPS hosts
+- Changed Node and .NET icon proxy downloads to stop reading at 5 MB instead of buffering an oversized response first
+- Fixed XIVAPI v2 icon URLs being normalized to an empty source and prevented empty icons from requesting the current page as an image
+- Restricted desktop static serving to packaged public assets and made item-mapping generation use 32-bit icon IDs plus atomic output replacement
 
 - Added real-time CN party finder browsing with search, data-center and category filters, pagination, refresh, and listing details
 - Corrected the Variant & Criterion filter contract to `V&C Dungeon Finder` and mapped source aliases such as `AdventuringForays`

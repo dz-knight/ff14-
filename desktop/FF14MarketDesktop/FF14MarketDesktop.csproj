@@ -18,6 +18,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="FF14MarketDesktop.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Include="..\..\index.html" Link="wwwroot\index.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
