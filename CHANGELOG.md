@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.1 - 2026-08-23
+
+- Added a local alias for `第四期重建用的特供硅砂（检）` -> item ID `31999`; the generated client mapping uses the alternate spelling `硅沙`
+- Normalized whitespace around Chinese and ASCII parentheses before Wiki search and desktop Wiki resolver navigation
+- Fast local aliases no longer wait for CafeMaker, and the market panel distinguishes pending Universalis data from an empty market
+- Item Wiki buttons now open normalized Wiki search URLs instead of fragile direct article titles
+- Item ID `31999` also uses the canonical local “硅砂” name when opened directly
+- Added regression coverage for the translation alias, whitespace-insensitive item identity, and Wiki query formatting
+
 ## v1.1.0 - 2026-08-19
 
 - Changed party-finder loading to render the first API page immediately and append later pages in the background
