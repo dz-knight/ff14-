@@ -335,6 +335,7 @@ async function testLoadItemPageCompletes() {
       currentWorldRows: [],
       currentCraftRecipes: new Map(),
     },
+    getItemAliasMeta: () => null,
     dom: { searchInput: { value: "" } },
     console: { error() {} },
     getItem: async () => ({ ID: 99, Name: "测试物品", GameContentLinks: {} }),
@@ -374,6 +375,7 @@ async function testItemFallbackRejectsEmptyRemoteData() {
   const context = {
     ENCYCLOPEDIA_API: "https://example.invalid",
     state: { resolvedAliases: aliases, itemMappingById: new Map() },
+    getItemAliasMeta: (itemId) => aliases.get(Number(itemId)) || null,
     fetchJson: async () => ({}),
     fetchXivApiItem: async () => { throw new Error("offline"); },
     mergeItemPayload: () => ({}),
@@ -410,6 +412,81 @@ function testStorageFailureDoesNotBreakSearch() {
   vm.createContext(context);
   vm.runInContext(`${source}; globalThis.saveSearchHistoryForTest = saveSearchHistory;`, context);
   assert.doesNotThrow(() => context.saveSearchHistoryForTest("秘银"));
+}
+
+function testChineseItemAliasAndWikiSpacing() {
+  const normalizer = extractBlock(
+    "function normalizeSearchKey",
+    "\n}\n\nfunction formatWikiSearchQuery"
+  );
+  const formatter = extractBlock(
+    "function formatWikiSearchQuery",
+    "\n}\n\nfunction buildResolvedAliasItems"
+  );
+  const aliasStart = appSource.indexOf("const KNOWN_ITEM_ALIASES =");
+  const aliasEnd = appSource.indexOf("const state =", aliasStart);
+  assert.notEqual(aliasStart, -1, "known item aliases must be declared");
+  assert.notEqual(aliasEnd, -1, "known item alias declaration must have an end");
+  const aliasSource = appSource.slice(aliasStart, aliasEnd);
+  const context = { MAX_SEARCH_QUERY_LENGTH: 256 };
+  vm.createContext(context);
+  vm.runInContext(
+    `${normalizer};${formatter};${aliasSource};globalThis.aliasesForTest = NORMALIZED_KNOWN_ITEM_ALIASES;`,
+    context
+  );
+
+  const noSpace = "第四期重建用的特供硅砂（检）";
+  const withSpace = "第四期重建用的特供硅砂 （检）";
+  assert.equal(
+    context.aliasesForTest[context.normalizeSearchKey(noSpace)].itemId,
+    31999,
+    "the Wiki spelling should resolve to the local market item ID"
+  );
+  assert.equal(
+    context.normalizeSearchKey(noSpace),
+    context.normalizeSearchKey(withSpace),
+    "spacing around the parenthesis must not change item identity"
+  );
+  assert.equal(
+    context.formatWikiSearchQuery(noSpace),
+    withSpace,
+    "Wiki queries should add the spacing accepted by the Wiki search"
+  );
+  assert.equal(
+    context.formatWikiSearchQuery("  第四期重建用的特供硅砂  ( 检 ) "),
+    "第四期重建用的特供硅砂 (检)",
+    "Wiki query formatting should collapse redundant whitespace"
+  );
+}
+
+function testMappedItemWikiQueries() {
+  const formatter = extractBlock(
+    "function formatWikiSearchQuery",
+    "\n}\n\nfunction buildResolvedAliasItems"
+  );
+  const context = { MAX_SEARCH_QUERY_LENGTH: 256 };
+  vm.createContext(context);
+  vm.runInContext(`${formatter};`, context);
+
+  const mappingPath = path.join(__dirname, "..", "data", "item_mapping.min.json");
+  const payload = JSON.parse(fs.readFileSync(mappingPath, "utf8"));
+  const entries = Array.isArray(payload.Entries) ? payload.Entries : payload.entries;
+  assert.ok(Array.isArray(entries) && entries.length > 0, "item mapping should be available for Wiki query coverage");
+
+  let parenthesisCount = 0;
+  let whitespaceCount = 0;
+  for (const entry of entries) {
+    const name = String(entry?.ZhName || entry?.zhName || "");
+    if (!name) continue;
+    const normalized = context.formatWikiSearchQuery(name);
+    if (/[()（）]/.test(name)) parenthesisCount += 1;
+    if (/\s/.test(name)) whitespaceCount += 1;
+    assert.doesNotMatch(normalized, /[^\s][(（]|[(（]\s|\s[)）]/, `Wiki punctuation spacing invalid for item ${entry.ItemId}`);
+    assert.doesNotMatch(normalized, /\s{2,}/, `Wiki whitespace not collapsed for item ${entry.ItemId}`);
+  }
+
+  assert.ok(parenthesisCount >= 500, "mapping should include broad parenthesis coverage");
+  assert.ok(whitespaceCount >= 30, "mapping should include broad whitespace coverage");
 }
 
 function testIconPathNormalizationAndEmptyMarkup() {
@@ -521,6 +598,8 @@ async function main() {
   await testLoadItemPageCompletes();
   await testItemFallbackRejectsEmptyRemoteData();
   testStorageFailureDoesNotBreakSearch();
+  testChineseItemAliasAndWikiSpacing();
+  testMappedItemWikiQueries();
   testIconPathNormalizationAndEmptyMarkup();
   await testMarketableValidationAndRetry();
   await testAllRankingBatchesFail();
