@@ -12,6 +12,7 @@ internal sealed class MainForm : Form
     private const string WikiHost = "ff14.huijiwiki.com";
     private const string UniversalisHost = "universalis.app";
     private const string DefaultWikiPage = "https://ff14.huijiwiki.com/wiki/任务:晓月之终途";
+    private const int MaxWikiSearchLength = 256;
     private static readonly TimeSpan NavigationTimeout = TimeSpan.FromSeconds(15);
 
     private readonly TabControl _tabs;
@@ -418,7 +419,8 @@ internal sealed class MainForm : Form
             return new WikiResolveResult(null, null, null, null);
         }
 
-        var searchUrl = $"{WikiBaseUrl}/index.php?search={Uri.EscapeDataString(query)}";
+        var searchQuery = FormatWikiSearchQuery(query);
+        var searchUrl = $"{WikiBaseUrl}/index.php?search={Uri.EscapeDataString(searchQuery)}";
         await NavigateAndWaitAsync(resolverWikiView, new Uri(searchUrl), cancellationToken);
 
         var firstLinkScript = """
@@ -1257,8 +1259,9 @@ internal sealed class MainForm : Form
             return;
         }
 
-        var target = $"{WikiBaseUrl}/index.php?search={Uri.EscapeDataString(query)}";
-        OpenWikiPreview(new Uri(target), query);
+        var searchQuery = FormatWikiSearchQuery(query);
+        var target = $"{WikiBaseUrl}/index.php?search={Uri.EscapeDataString(searchQuery)}";
+        OpenWikiPreview(new Uri(target), searchQuery);
     }
 
     private void OpenWikiPreview(Uri uri, string title)
@@ -1349,7 +1352,7 @@ internal sealed class MainForm : Form
             _tabs.SelectedIndex = 1;
         }
 
-        var text = query.Trim();
+        var text = FormatWikiSearchQuery(query);
         if (string.IsNullOrWhiteSpace(text))
         {
             _wikiView.Source = new Uri(DefaultWikiPage);
@@ -1358,6 +1361,16 @@ internal sealed class MainForm : Form
 
         var target = $"{WikiBaseUrl}/index.php?search={Uri.EscapeDataString(text)}";
         _wikiView.Source = new Uri(target);
+    }
+
+    internal static string FormatWikiSearchQuery(string? value)
+    {
+        var text = Regex.Replace(value ?? string.Empty, @"[\u200B\u200C\u200D\uFEFF]", string.Empty);
+        text = Regex.Replace(text, @"\s+", " ").Trim();
+        text = Regex.Replace(text, @"\s*([（(])\s*", " $1");
+        text = Regex.Replace(text, @"\s*([）)])\s*", "$1 ");
+        text = Regex.Replace(text, @"\s+", " ").Trim();
+        return text.Length > MaxWikiSearchLength ? text[..MaxWikiSearchLength] : text;
     }
 
     private void HandleClosed(object? sender, FormClosedEventArgs e)
