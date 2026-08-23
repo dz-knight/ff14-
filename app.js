@@ -33,10 +33,28 @@ const FETCH_LIMITS = {
   shopNpcsPerShop: 4,
   questChain: 32,
 };
-const KNOWN_ITEM_ALIASES = {};
+const KNOWN_ITEM_ALIASES = {
+  "第四期重建用的特供硅砂（检）": {
+    itemId: 31999,
+    name: "第四期重建用的特供硅砂 （检）",
+    englishName: "Approved Grade 4 Artisanal Skybuilders' Silex",
+    icon: "023000/023831.png",
+    description: "第四期伊修加德重建工程使用的已检验特供硅砂。",
+  },
+  "第四期重建用的特供硅沙（检）": {
+    itemId: 31999,
+    name: "第四期重建用的特供硅砂 （检）",
+    englishName: "Approved Grade 4 Artisanal Skybuilders' Silex",
+    icon: "023000/023831.png",
+    description: "第四期伊修加德重建工程使用的已检验特供硅砂。",
+  },
+};
 
 const NORMALIZED_KNOWN_ITEM_ALIASES = Object.fromEntries(
   Object.entries(KNOWN_ITEM_ALIASES).map(([key, value]) => [normalizeSearchKey(key), value])
+);
+const KNOWN_ITEM_ALIASES_BY_ID = new Map(
+  Object.values(KNOWN_ITEM_ALIASES).map((value) => [Number(value.itemId), { ...value, fast: true }])
 );
 
 const state = {
@@ -47,6 +65,7 @@ const state = {
   currentEntity: null,
   entityLoadToken: 0,
   currentWorldRows: [],
+  marketStatus: "idle",
   searchToken: 0,
   searchTimer: null,
   pendingWikiResolve: new Map(),
@@ -823,6 +842,18 @@ function normalizeSearchKey(value) {
     .toLowerCase();
 }
 
+function formatWikiSearchQuery(value) {
+  return String(value || "")
+    .replace(/[\u200B\u200C\u200D\uFEFF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\s*([（(])\s*/g, " $1")
+    .replace(/\s*([）)])\s*/g, "$1 ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_SEARCH_QUERY_LENGTH);
+}
+
 function buildResolvedAliasItems(keyword, resolved) {
   const itemId = Number(resolved?.itemId);
   if (!Number.isSafeInteger(itemId) || itemId <= 0) {
@@ -1213,6 +1244,7 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   updateRoute("item", item.ID, item.Name, replace);
   state.currentEntity = { type: "item", data: item };
   state.currentWorldRows = [];
+  state.marketStatus = "loading";
   state.currentCraftRecipes = new Map();
   dom.searchInput.value = getPreferredItemName(item);
   renderItemOverview(item);
@@ -1228,15 +1260,22 @@ async function loadItemPage(itemId, { replace = false } = {}) {
   const limitedUsageRecipeIds = usageRecipeIds.slice(0, FETCH_LIMITS.usageRecipes);
   const craftIds = craftRecipeIds.slice(0, FETCH_LIMITS.craftRecipes);
   const gatherIds = gatheringItemIds.slice(0, FETCH_LIMITS.gatherItems);
-  const aliasMeta = state.resolvedAliases.get(itemId) || null;
+  const aliasMeta = getItemAliasMeta(itemId);
   const shouldSkipRelatedQuestSearch = !!aliasMeta?.fast || !Object.keys(links || {}).length;
   const marketRowsPromise = getMarketRows(itemId);
   marketRowsPromise.then((marketRows) => {
     if (loadToken !== state.entityLoadToken) return;
+    state.marketStatus = "ready";
     state.currentWorldRows = marketRows;
     renderMarketOverview(item, marketRows);
     renderPriceTable();
-  }).catch(() => {});
+  }).catch((error) => {
+    if (loadToken !== state.entityLoadToken) return;
+    state.marketStatus = "error";
+    console.error("读取市场数据失败", error);
+    renderMarketOverview(item, []);
+    renderPriceTable();
+  });
 
   const [marketRows, craftRecipes, usageRecipes, gatherData, relatedQuests, shopSources] = await Promise.all([
     marketRowsPromise,
@@ -1263,6 +1302,7 @@ async function loadItemPage(itemId, { replace = false } = {}) {
     .filter((recipe) => Number(recipe.ItemResultTargetID) !== item.ID);
 
   state.currentWorldRows = marketRows;
+  state.marketStatus = "ready";
   renderMarketOverview(item, marketRows);
   renderPriceTable();
   renderObtainPanel(
@@ -1323,7 +1363,7 @@ async function getItem(itemId) {
 }
 
 async function fetchItemWithFallback(itemId) {
-  const aliasMeta = state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null;
+  const aliasMeta = getItemAliasMeta(itemId);
   const columns = encodeURIComponent([
     "ID",
     "Name",
@@ -1343,11 +1383,9 @@ async function fetchItemWithFallback(itemId) {
   ].join(","));
   const url = `${ENCYCLOPEDIA_API}/item/${itemId}?language=chs&columns=${columns}`;
   if (aliasMeta?.fast) {
-    const [primary, xivapi] = await Promise.all([
-      fetchJson(url).catch(() => null),
-      fetchXivApiItem(itemId).catch(() => null),
-    ]);
-    return applyAliasMetaToItem(mergeItemPayload(primary, xivapi, itemId), aliasMeta, itemId);
+    // Local mapping is authoritative for a fast alias. Do not let CafeMaker or XIVAPI
+    // delay the independent Universalis market request.
+    return applyAliasMetaToItem(null, aliasMeta, itemId);
   }
 
   const primary = await fetchJson(url).catch(() => null);
@@ -1647,7 +1685,7 @@ function renderItemOverview(item) {
         <div class="link-row">
           <a class="link-button" href="?type=item&id=${encodeURIComponent(item.ID)}&name=${encodeURIComponent(itemName)}">当前物品详情</a>
           ${renderExternalButton(`https://universalis.app/market/${item.ID}`, "打开市场板")}
-          ${renderWikiOpenButton(buildWikiArticleUrl(itemName, "物品"))}
+          ${renderWikiOpenButton(buildWikiSearchUrl(itemName))}
         </div>
       </div>
     </div>
@@ -2390,7 +2428,7 @@ async function hydrateSalesRankingNames(ranking) {
     if (!name || isFallbackRankingName(name, itemId)) {
       return;
     }
-    const aliasMeta = state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null;
+    const aliasMeta = getItemAliasMeta(itemId);
     state.resolvedAliases.set(itemId, {
       preferredName: name,
       preferredEnglishName: item?.Name_en || aliasMeta?.preferredEnglishName || aliasMeta?.englishName || "",
@@ -2684,13 +2722,13 @@ function isFallbackRankingName(name, itemId) {
 
 function getRankingIcon(row) {
   const itemId = Number(row?.itemId || 0);
-  const aliasMeta = itemId ? (state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null) : null;
+  const aliasMeta = itemId ? getItemAliasMeta(itemId) : null;
   return String(aliasMeta?.icon || aliasMeta?.iconUrl || aliasMeta?.IconUrl || aliasMeta?.iconPath || aliasMeta?.IconPath || row?.icon || "");
 }
 
 function getRankingIconFallbackUrls(row, primaryUrl) {
   const itemId = Number(row?.itemId || 0);
-  const aliasMeta = itemId ? (state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null) : null;
+  const aliasMeta = itemId ? getItemAliasMeta(itemId) : null;
   const normalizedPath = [
     aliasMeta?.iconPath,
     aliasMeta?.IconPath,
@@ -3667,12 +3705,12 @@ function renderWikiOpenButton(query, label = "打开国服 Wiki") {
 }
 
 function buildWikiSearchUrl(name) {
-  const query = String(name || "").slice(0, MAX_SEARCH_QUERY_LENGTH);
+  const query = formatWikiSearchQuery(name);
   return `https://ff14.huijiwiki.com/index.php?search=${encodeURIComponent(query)}`;
 }
 
 function buildWikiArticleUrl(name, namespace = "") {
-  const title = String(name || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
+  const title = formatWikiSearchQuery(name);
   const prefix = String(namespace || "").trim();
   const pageTitle = prefix ? `${prefix}:${title}` : title;
   return title
@@ -3813,19 +3851,27 @@ function jsonString(value) {
 function getPreferredItemName(item) {
   const itemId = item?.ID ? Number(item.ID) : 0;
   const aliasMeta = itemId
-    ? (state.resolvedAliases.get(itemId) || state.itemMappingById?.get(itemId) || null)
+    ? getItemAliasMeta(itemId)
     : null;
   return getAliasDisplayName(aliasMeta) || item?.Name || item?.Name_en || "";
 }
 
 function getPreferredItemNameById(itemId, fallbackName = "") {
   const numericId = Number(itemId);
-  const aliasMeta = state.resolvedAliases.get(numericId) || state.itemMappingById?.get(numericId) || null;
+  const aliasMeta = getItemAliasMeta(numericId);
   const preferredName = getAliasDisplayName(aliasMeta);
   if (preferredName) {
     return preferredName;
   }
   return String(fallbackName || "");
+}
+
+function getItemAliasMeta(itemId) {
+  const numericId = Number(itemId);
+  return state.resolvedAliases.get(numericId)
+    || KNOWN_ITEM_ALIASES_BY_ID.get(numericId)
+    || state.itemMappingById?.get(numericId)
+    || null;
 }
 
 function getAliasDisplayName(aliasMeta) {
@@ -3853,7 +3899,7 @@ async function openWikiSearch(query) {
   }
 
   const resolved = await resolveItemViaWikiFallback(text).catch(() => null);
-  const target = getSafeWikiUrl(resolved?.url) || buildWikiArticleUrl(text) || buildWikiSearchUrl(text);
+  const target = getSafeWikiUrl(resolved?.url) || buildWikiSearchUrl(text);
   window.open(target, "_blank", "noopener,noreferrer");
 }
 
@@ -3982,7 +4028,7 @@ async function bootstrap() {
 
 function resolveKnownItemAlias(keyword) {
   const text = normalizeSearchKey(keyword);
-  const matches = state.itemMappingExact?.get(text) || state.resolvedQueries.get(text) || NORMALIZED_KNOWN_ITEM_ALIASES[text] || null;
+  const matches = NORMALIZED_KNOWN_ITEM_ALIASES[text] || state.resolvedQueries.get(text) || state.itemMappingExact?.get(text) || null;
   if (Array.isArray(matches)) {
     return matches.length === 1 ? matches[0] : null;
   }
@@ -4066,7 +4112,7 @@ async function searchItems(keyword, { allowDeepFallback = true } = {}) {
 }
 
 function resolveItemViaWikiFallback(keyword) {
-  const query = String(keyword || "").trim().slice(0, MAX_SEARCH_QUERY_LENGTH);
+  const query = formatWikiSearchQuery(keyword);
   if (!query || !window.__HOST_BRIDGE__) {
     return Promise.resolve(null);
   }
@@ -4422,6 +4468,11 @@ function renderMarketOverview(item, worldRows) {
   const modeLabel = getMarketModeLabel();
   const regionLabel = getSelectedRegionLabel();
 
+  const marketLoading = state.marketStatus === "loading"
+    && state.currentEntity?.type === "item"
+    && Number(state.currentEntity.data?.ID) === Number(item?.ID)
+    && !worldRows.length;
+
   const markup = `
     <div class="market-quality-row">
       ${qualityOptions.map((entry) => `
@@ -4431,8 +4482,8 @@ function renderMarketOverview(item, worldRows) {
     <div class="market-overview-grid">
       <div class="metric-card">
         <div class="metric-card__label">${escapeHtml(modeLabel)} ${escapeHtml(regionLabel)}最低价</div>
-        <div class="metric-card__value">${cheapest ? formatPrice(getSelectedQualityStat(cheapest).minPrice) : "暂无上架"}</div>
-        <div class="metric-card__detail">${cheapest ? `${escapeHtml(getRowMarketRegion(cheapest))} / ${escapeHtml(cheapest.worldName)}` : `当前大区没有读取到该物品 ${escapeHtml(modeLabel)} 品质的市场板上架。`}</div>
+        <div class="metric-card__value">${marketLoading ? "读取中" : cheapest ? formatPrice(getSelectedQualityStat(cheapest).minPrice) : "暂无上架"}</div>
+        <div class="metric-card__detail">${marketLoading ? "正在从 Universalis 读取各国服大区的市场板数据。" : cheapest ? `${escapeHtml(getRowMarketRegion(cheapest))} / ${escapeHtml(cheapest.worldName)}` : `当前大区没有读取到该物品 ${escapeHtml(modeLabel)} 品质的市场板上架。`}</div>
       </div>
       <div class="metric-card">
         <div class="metric-card__label">已覆盖世界服</div>
@@ -4465,7 +4516,8 @@ function renderMarketOverview(item, worldRows) {
 
 function renderPriceTable() {
   if (!state.currentWorldRows.length) {
-    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">当前页面没有价格数据</td></tr>`;
+    const loading = state.marketStatus === "loading";
+    dom.priceTableBody.innerHTML = `<tr><td colspan="7" class="table-empty">${loading ? "正在读取 Universalis 价格数据" : "当前页面没有价格数据"}</td></tr>`;
     return;
   }
 
