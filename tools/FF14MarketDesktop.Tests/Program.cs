@@ -35,6 +35,18 @@ try
     Assert(
         !MainForm.TryCreateTrustedHttpsUri("http://ff14.huijiwiki.com/wiki/test", "ff14.huijiwiki.com", out _),
         "non-HTTPS resolver URLs should be rejected");
+    Assert(
+        MainForm.FormatWikiSearchQuery("第四期重建用的特供硅砂（检）") == "第四期重建用的特供硅砂 （检）",
+        "Wiki search should add the required space before the parenthesis");
+    Assert(
+        MainForm.FormatWikiSearchQuery("  第四期重建用的特供硅砂  ( 检 ) ") == "第四期重建用的特供硅砂 (检)",
+        "Wiki search should normalize redundant whitespace and ASCII parentheses");
+    Assert(
+        MainForm.FormatWikiSearchQuery("\u200B第四期重建用的特供硅砂\u3000（ 检 ）\uFEFF") == "第四期重建用的特供硅砂 （检）",
+        "Wiki search should remove zero-width and full-width whitespace");
+    Assert(
+        MainForm.FormatWikiSearchQuery("特供硅砂（检）名称") == "特供硅砂 （检） 名称",
+        "Wiki search should preserve searchable words around punctuation");
     Assert(MainForm.ParseDirectItemId("123") == 123, "positive item IDs should be accepted");
     Assert(MainForm.ParseDirectItemId("0") is null, "non-positive item IDs should be rejected");
     Assert(
