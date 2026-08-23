@@ -1,4 +1,32 @@
-# FF14 物价百科桌面端 v1.1.0 更新说明
+# FF14 物价百科桌面端 v1.1.1 更新说明
+
+## v1.1.1 - 2026-08-23
+
+本次更新修复中文物品名称与国服 Wiki 页面标题之间的翻译和空格差异。
+
+- 增加 `第四期重建用的特供硅砂（检）` / `第四期重建用的特供硅沙（检）` 到本地别名映射，统一使用 Universalis 物品 ID `31999`
+- 本地别名优先走映射表，不再等待故障的 CafeMaker，价格查询继续由 Universalis 提供
+- Wiki 搜索统一清理零宽字符、全角空格和多余空格，并规范化括号前后的空格
+- 桌面端 Wiki 解析和预览使用相同的规范化查询规则
+- 增加 521 个括号名称和 39 个空白名称的批量回归覆盖
+
+### 发布信息
+
+- 标签：`v1.1.1`
+- 安装包：`FF14MarketDesktop-v1.1.1-user.zip`
+- SHA-256：`F9023EF0333EACB03877B31F84EC48A54889E6EB50411389FE83381B1424CB7B`
+- 回滚：从 Releases 下载并解压上一版本，替换整个程序目录；不应只替换单个 EXE
+
+### 验证
+
+- `node --check app.js`
+- `node tools/test-app-regressions.js`
+- `node tools/test-party-finder.js`
+- `node tools/test-search-ranking.js`
+- `node tools/test-market-calculations.js`
+- `node tools/test-static-server.js`
+- `dotnet run --project tools/FF14MarketDesktop.Tests/FF14MarketDesktop.Tests.csproj -c Release --no-restore`
+- `dotnet build desktop/FF14MarketDesktop/FF14MarketDesktop.csproj -c Release --no-restore`
 
 ## v1.1.0 - 2026-08-18
 
