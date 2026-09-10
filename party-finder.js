@@ -36,7 +36,6 @@
   const MAX_SEARCH_LENGTH = 200;
   const MAX_NAME_LENGTH = 200;
   const MAX_DESCRIPTION_LENGTH = 4000;
-
   const CATEGORY_OPTIONS = [
     { value: "DutyRoulette", zh: "随机任务" },
     { value: "Dungeons", zh: "迷宫挑战" },
@@ -172,9 +171,9 @@
     return `${API_BASE}/api/listing/${encodeURIComponent(id)}`;
   }
 
-  function isCnWorldId(worldId) {
-    const id = Number(worldId);
-    return Number.isFinite(id) && id >= 1000 && id <= 1999;
+  function isCnDatacenter(value) {
+    const normalized = normalizeDatacenter(value);
+    return DATACENTER_OPTIONS.some((datacenter) => datacenter.key === normalized);
   }
 
   function cleanText(value, maxLength) {
@@ -214,7 +213,7 @@
     const byId = new Map();
     for (const raw of Array.isArray(rawItems) ? rawItems : []) {
       const listing = normalizeListing(raw);
-      if (!listing || !isCnWorldId(listing.createdWorldId)) continue;
+      if (!listing || !isCnDatacenter(listing.datacenter)) continue;
       const key = String(listing.id);
       const previous = byId.get(key);
       if (!previous || String(listing.updatedAt).localeCompare(String(previous.updatedAt)) > 0) {
@@ -390,6 +389,12 @@
     return Boolean(error && error.name === "AbortError");
   }
 
+  function isNetworkError(error) {
+    if (!error || error.name === "AbortError" || error.name === "TimeoutError") return false;
+    const message = String(error.message || error);
+    return /failed to fetch|networkerror|load failed|网络错误|网络连接/i.test(message);
+  }
+
   function normalizePagination(raw) {
     if (!raw || typeof raw !== "object") return null;
     const total = Number(raw.total);
@@ -454,6 +459,13 @@
           const abortError = new Error(timedOut ? "请求超时" : "请求已取消");
           abortError.name = timedOut ? "TimeoutError" : "AbortError";
           throw abortError;
+        }
+        if (isNetworkError(error)) {
+          const networkError = new Error("无法连接招募接口，请检查网络或稍后重试");
+          networkError.code = "NETWORK_ERROR";
+          networkError.cause = error;
+          networkError.url = url;
+          throw networkError;
         }
         throw error;
       } finally {
@@ -1104,7 +1116,8 @@
     detailLabel,
     normalizeDatacenter,
     datacenterVariants,
-    isCnWorldId,
+    isCnDatacenter,
+    isNetworkError,
     normalizeListing,
     collectListings,
     normalizePagination,

@@ -1,4 +1,21 @@
-# FF14 物价百科桌面端 v1.1.1 更新说明
+# FF14 物价百科桌面端 v1.1.2 更新说明
+
+## v1.1.2 - 2026-09-10
+
+本版本修复国服招募识别逻辑：不再依赖会变化的世界 ID，直接根据 Remote Party Finder 接口返回的 `datacenter` 字段判断国服。网页版与桌面版使用同一套实现。
+
+### 发布信息
+
+- 标签：`v1.1.2`
+- 安装包：`FF14MarketDesktop-v1.1.2-user.zip`
+- SHA-256：`01BC0FC2F108AED6F892D394CC24F649BF339DDFCFD8F8DA1F751A669F82B629`
+
+### 验证
+
+- `node --check party-finder.js`
+- `node tools/test-party-finder.js`
+- `dotnet run --project tools/FF14MarketDesktop.Tests/FF14MarketDesktop.Tests.csproj -c Release --no-restore`
+- `dotnet build desktop/FF14MarketDesktop/FF14MarketDesktop.csproj -c Release --no-restore`
 
 ## v1.1.1 - 2026-08-23
 

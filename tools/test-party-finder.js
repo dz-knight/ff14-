@@ -7,7 +7,8 @@ const {
   detailLabel,
   normalizeDatacenter,
   datacenterVariants,
-  isCnWorldId,
+  isCnDatacenter,
+  isNetworkError,
   normalizeListing,
   collectListings,
   normalizePagination,
@@ -61,12 +62,13 @@ async function main() {
   assert.deepEqual(datacenterVariants("猫小胖"), ["猫小胖", "貓小胖"]);
   assert.deepEqual(datacenterVariants(""), []);
 
-  assert.equal(isCnWorldId(1000), true);
-  assert.equal(isCnWorldId(1999), true);
-  assert.equal(isCnWorldId(999), false);
-  assert.equal(isCnWorldId(2000), false);
-  assert.equal(isCnWorldId(4035), false);
-  assert.equal(isCnWorldId(undefined), false);
+  assert.equal(isCnDatacenter("陆行鸟"), true);
+  assert.equal(isCnDatacenter("陸行鳥"), true);
+  assert.equal(isCnDatacenter("Aether"), false);
+  assert.equal(isCnDatacenter(""), false);
+  assert.equal(isNetworkError(new TypeError("Failed to fetch")), true);
+  assert.equal(isNetworkError(new TypeError("programming error")), false);
+  assert.equal(isNetworkError(new Error("HTTP 503")), false);
   assert.deepEqual(
     normalizePagination({ total: 250, page: 1, per_page: 100, total_pages: 3 }),
     { total: 250, page: 1, perPage: 100, totalPages: 3 }
@@ -128,8 +130,16 @@ async function main() {
       name: "国际服数据",
       created_world_id: 4035,
       created_world: "泰坦",
-      datacenter: "陸行鳥",
+      datacenter: "Aether",
       updated_at: "2026-08-18T07:30:00Z",
+    },
+    {
+      id: 4,
+      name: "新 ID 国服数据",
+      created_world_id: 4028,
+      created_world: "伊弗利特",
+      datacenter: "陸行鳥",
+      updated_at: "2026-08-18T07:35:00Z",
     },
     {
       id: 1,
@@ -148,8 +158,8 @@ async function main() {
       updated_at: "2026-08-18T07:40:00Z",
     },
   ]);
-  assert.deepEqual(deduped.map((item) => item.id), [3, 1]);
-  assert.equal(deduped[1].name, "新数据", "newest duplicate wins");
+  assert.deepEqual(deduped.map((item) => item.id), [3, 4, 1]);
+  assert.equal(deduped[2].name, "新数据", "newest duplicate wins");
 
   const oldSnapshot = [
     { id: 40, name: "旧版本", updatedAt: "2026-08-18T07:00:00Z" },
@@ -283,8 +293,8 @@ async function main() {
       if (params.page === 1) {
         return {
           data: [
-            { id: 20, name: "第一页", created_world_id: 1167, updated_at: "2026-08-18T07:00:00Z" },
-            { id: 99, name: "国际服", created_world_id: 4035, updated_at: "2026-08-18T07:05:00Z" },
+            { id: 20, name: "第一页", created_world_id: 4028, datacenter: "陸行鳥", updated_at: "2026-08-18T07:00:00Z" },
+            { id: 99, name: "国际服", created_world_id: 9999, datacenter: "Aether", updated_at: "2026-08-18T07:05:00Z" },
           ],
           pagination: { total: 4, page: 1, perPage: 100, totalPages: 3 },
         };
@@ -292,8 +302,8 @@ async function main() {
       if (params.page === 2) throw new Error("temporary page failure");
       return {
         data: [
-          { id: 20, name: "去重后的新版本", created_world_id: 1167, updated_at: "2026-08-18T07:20:00Z" },
-          { id: 21, name: "第三页", created_world_id: 1042, updated_at: "2026-08-18T07:30:00Z" },
+          { id: 20, name: "去重后的新版本", created_world_id: 4028, datacenter: "陸行鳥", updated_at: "2026-08-18T07:20:00Z" },
+          { id: 21, name: "第三页", created_world_id: 4035, datacenter: "陸行鳥", updated_at: "2026-08-18T07:30:00Z" },
         ],
         pagination: { total: 4, page: 3, perPage: 100, totalPages: 3 },
       };
@@ -319,7 +329,7 @@ async function main() {
       if (params.page === 1) {
         return {
           data: [
-            { id: 50, name: "立即显示", created_world_id: 1167, updated_at: "2026-08-18T08:00:00Z" },
+            { id: 50, name: "立即显示", created_world_id: 4028, datacenter: "陸行鳥", updated_at: "2026-08-18T08:00:00Z" },
           ],
           pagination: { total: 2, page: 1, perPage: 100, totalPages: 2 },
         };
@@ -342,7 +352,7 @@ async function main() {
   assert.deepEqual(slowProgress[0].items.map((item) => item.id), [50]);
   resolveSlowPage({
     data: [
-      { id: 51, name: "后台补充", created_world_id: 1042, updated_at: "2026-08-18T07:30:00Z" },
+      { id: 51, name: "后台补充", created_world_id: 4035, datacenter: "陸行鳥", updated_at: "2026-08-18T07:30:00Z" },
     ],
     pagination: { total: 2, page: 2, perPage: 100, totalPages: 2 },
   });
@@ -428,6 +438,16 @@ async function main() {
   await assert.rejects(
     () => client.fetchDetail(999),
     (error) => error.expired === true && error.status === 404
+  );
+
+  const failedFetchClient = createApiClient(async () => {
+    throw new TypeError("Failed to fetch");
+  });
+  await assert.rejects(
+    () => failedFetchClient.fetchList({ page: 1, perPage: 100 }),
+    (error) => error.code === "NETWORK_ERROR"
+      && /无法连接招募接口/.test(error.message)
+      && error.cause instanceof TypeError
   );
 
   const listingsClient = createApiClient(async () => ({

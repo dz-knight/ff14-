@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.1.2 - 2026-09-10
+
+- Changed CN party-finder filtering to trust the upstream datacenter field instead of maintaining a world ID allowlist.
+- Synchronized the web and desktop party-finder implementation and regression fixtures.
+- Normalized browser network failures into a retryable user-facing message.
+
+
 ## v1.1.1 - 2026-08-23
 
 - Added a local alias for `第四期重建用的特供硅砂（检）` -> item ID `31999`; the generated client mapping uses the alternate spelling `硅沙`
