@@ -1,4 +1,42 @@
-# FF14 物价百科桌面端 v1.1.2 更新说明
+# FF14 物价百科桌面端 v1.1.3 更新说明
+
+## v1.1.3
+
+本版本同步修复网页版和桌面版整类 HQ / 非 HQ 筛选问题，不对高山茶或其他单个物品设置白名单。
+
+### 修复内容
+
+- 本地双语映射和百科兜底查询不再把缺失的品质信息默认成“不支持 HQ”。品质未知时仍可筛选，不额外等待百科接口。
+- 市场总览顶部明确显示“品质：全部 / HQ / 非 HQ”；最低价、上架数和库存量随所选品质切换。
+- 市场中已经存在 HQ 上架时，即使物品资料错误标记为普通品质，也保留 HQ 筛选。
+- 所选品质没有上架时明确显示“暂无上架”，不会混入另一种品质；缺失上架 ID 时，同价同数量的 HQ / 非 HQ 记录不会再互相去重。
+- 商品资料缺失时显示“品质信息待确认”，不再误标“普通品质”。同步更新脚本缓存版本。
+
+### 验证
+
+- `node --check app.js`
+- `node tools/test-market-quality.js`：覆盖本地 17,323 条物品映射，以及元数据真/假/未知、品质切换、空结果、加载状态和去重。
+- `node tools/test-app-regressions.js`：已接入上述品质回归，避免后续优化再次隐藏筛选。
+- `node tools/test-search-ranking.js`
+- `node tools/test-market-calculations.js`
+- `node tools/test-party-finder.js`
+- `node tools/test-static-server.js`
+
+### 使用与限制
+
+- 在商品详情的“市场总览”顶部切换品质；默认“全部”合并两种品质，不是单独的 HQ 报价。
+- 缺少物品资料且没有 HQ 上架时，保留筛选不代表该物品一定能制作 HQ；以实际上架记录和游戏内资料为准。
+- 市场价格仍依赖 Universalis 和玩家上传数据；本次不保证第三方接口持续可用，也未修改销售排行或配方利润的品质统计口径。
+- 本版本不涉及数据迁移。若出现新回归，可退回 v1.1.2，但旧版不包含本次品质修复。
+- 问题反馈请提供物品名称、区服、品质选项和页面截图，提交到对应 GitHub 仓库 Issues。
+### 桌面发布
+
+- 安装包：`FF14MarketDesktop-v1.1.3-user.zip`
+- SHA-256：`994BBC55B146A7F56CFC1B903A63A1D03F81EC78A9CF56AC97AAB2B78E2FAC16`
+- Windows x64：完整解压后运行 `FF14MarketDesktop.exe`，不要仅复制 exe。
+- 保持原有 .NET 10 自包含和 WebView2 运行要求。
+- `dotnet run --project tools/FF14MarketDesktop.Tests/FF14MarketDesktop.Tests.csproj -c Release --no-restore`
+- `dotnet publish desktop/FF14MarketDesktop/FF14MarketDesktop.csproj -c Release -r win-x64 --self-contained true --no-restore -p:PublishSingleFile=false`
 
 ## v1.1.2 - 2026-09-10
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.1.3
 
 - Preserve unknown HQ capability for all local-mapping and fallback items instead of treating missing metadata as NQ-only.
 - Keep HQ/NQ filters available for unknown metadata or observed HQ listings; retain fast market loading without extra encyclopedia requests.
