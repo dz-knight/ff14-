@@ -589,6 +589,7 @@ async function testAllRankingBatchesFail() {
 }
 
 async function main() {
+  await require("./test-market-quality")();
   await testFetchJson();
   await testSearchRace();
   await testFuzzySearchRequiresSelection();

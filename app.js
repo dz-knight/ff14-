@@ -1434,7 +1434,7 @@ async function fetchXivApiItem(itemId) {
     LevelItem: fields.LevelItem?.row_id || fields.LevelItem || 0,
     PriceLow: 0,
     PriceMid: 0,
-    CanBeHq: !!fields.CanBeHq,
+    CanBeHq: typeof fields.CanBeHq === "boolean" ? fields.CanBeHq : null,
     IsUntradable: !!fields.IsUntradable,
     GamePatch: {
       Name: fields.Patch ? `Patch ${fields.Patch}` : "未知版本",
@@ -1460,7 +1460,7 @@ function mergeItemPayload(primary, fallback, itemId) {
     LevelItem: source.LevelItem || backup.LevelItem || 0,
     PriceLow: source.PriceLow || backup.PriceLow || 0,
     PriceMid: source.PriceMid || backup.PriceMid || 0,
-    CanBeHq: source.CanBeHq ?? backup.CanBeHq ?? false,
+    CanBeHq: source.CanBeHq ?? backup.CanBeHq ?? null,
     IsUntradable: source.IsUntradable ?? backup.IsUntradable ?? false,
     GamePatch: source.GamePatch?.Name ? source.GamePatch : (backup.GamePatch || { Name: "未知版本" }),
     Patch: source.Patch || backup.Patch || 0,
@@ -1480,7 +1480,7 @@ function applyAliasMetaToItem(item, aliasMeta, itemId) {
     LevelItem: 0,
     PriceLow: 0,
     PriceMid: 0,
-    CanBeHq: false,
+    CanBeHq: null,
     IsUntradable: false,
     GamePatch: { Name: "未知版本" },
     Patch: 0,
@@ -1665,7 +1665,7 @@ function renderItemOverview(item) {
   const tags = [
     item.ItemUICategory?.Name ? `<span class="tag">${escapeHtml(item.ItemUICategory.Name)}</span>` : "",
     `<span class="tag">物品等级 ${escapeHtml(item.LevelItem || 0)}</span>`,
-    `<span class="tag">${item.CanBeHq ? "可 HQ" : "普通品质"}</span>`,
+    `<span class="tag">${item.CanBeHq === true ? "可 HQ" : item.CanBeHq === false ? "普通品质" : "品质信息待确认"}</span>`,
     `<span class="tag">${item.IsUntradable ? "不可交易" : "可交易"}</span>`,
     `<span class="tag">${escapeHtml(patch)}</span>`,
   ].filter(Boolean).join("");
@@ -4328,8 +4328,9 @@ function getSelectedQualityStat(row) {
   };
 }
 
-function getQualityOptions(item) {
-  return item?.CanBeHq
+function getQualityOptions(item, worldRows = []) {
+  const hasHqListings = worldRows.some((row) => row.qualityStats?.hq?.listingCount > 0);
+  return item?.CanBeHq !== false || hasHqListings
     ? [
         { key: "all", label: "全部" },
         { key: "hq", label: "HQ" },
@@ -4352,7 +4353,8 @@ function buildWorldRowsFromPayload(dataCenter, payload) {
 
   for (const listing of listings) {
     const worldId = Number(listing.worldID);
-    const listingId = listing.listingID || `${worldId}-${listing.pricePerUnit}-${listing.quantity}`;
+    const qualityKey = listing.hq ? "hq" : "nq";
+    const listingId = listing.listingID || `${worldId}-${qualityKey}-${listing.pricePerUnit}-${listing.quantity}`;
     if (!grouped.has(worldId)) {
       grouped.set(worldId, { stats: createEmptyQualityStats() });
     }
@@ -4362,7 +4364,6 @@ function buildWorldRowsFromPayload(dataCenter, payload) {
       continue;
     }
 
-    const qualityKey = listing.hq ? "hq" : "nq";
     accumulateQualityStat(record.stats.all, listing, listingId);
     accumulateQualityStat(record.stats[qualityKey], listing, listingId);
   }
@@ -4443,7 +4444,8 @@ function summarizeRegions(worldRows) {
 }
 
 function renderMarketOverview(item, worldRows) {
-  if (!item?.CanBeHq) {
+  const qualityOptions = getQualityOptions(item, worldRows);
+  if (!qualityOptions.some((entry) => entry.key === getActiveMarketQuality())) {
     setActiveMarketQuality("all");
   }
 
@@ -4464,7 +4466,6 @@ function renderMarketOverview(item, worldRows) {
   const totalListings = rowsWithPrice.reduce((sum, row) => sum + getSelectedQualityStat(row).listingCount, 0);
   const totalUnits = rowsWithPrice.reduce((sum, row) => sum + getSelectedQualityStat(row).unitsForSale, 0);
   const regionSummary = summarizeRegions(worldRows);
-  const qualityOptions = getQualityOptions(item);
   const modeLabel = getMarketModeLabel();
   const regionLabel = getSelectedRegionLabel();
 
@@ -4474,9 +4475,10 @@ function renderMarketOverview(item, worldRows) {
     && !worldRows.length;
 
   const markup = `
-    <div class="market-quality-row">
+    <div class="market-quality-row" role="group" aria-label="商品品质筛选">
+      <span>品质：</span>
       ${qualityOptions.map((entry) => `
-        <button type="button" class="region-filter${getActiveMarketQuality() === entry.key ? " is-active" : ""}" data-market-quality="${entry.key}">${entry.label}</button>
+        <button type="button" class="region-filter${getActiveMarketQuality() === entry.key ? " is-active" : ""}" data-market-quality="${entry.key}" aria-pressed="${getActiveMarketQuality() === entry.key}">${entry.label}</button>
       `).join("")}
     </div>
     <div class="market-overview-grid">

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Preserve unknown HQ capability for all local-mapping and fallback items instead of treating missing metadata as NQ-only.
+- Keep HQ/NQ filters available for unknown metadata or observed HQ listings; retain fast market loading without extra encyclopedia requests.
+- Distinguish equal-price HQ/NQ listings without listing IDs, and label the quality controls explicitly.
+- Add `node tools/test-market-quality.js` covering all local mapping entries, metadata states, rendering, switching, empty HQ results, and deduplication.
+
 ## v1.1.2 - 2026-09-10
 
 - Changed CN party-finder filtering to trust the upstream datacenter field instead of maintaining a world ID allowlist.
